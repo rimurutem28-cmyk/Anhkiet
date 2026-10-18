@@ -1,6 +1,7 @@
 --[[
     Kiet Hub - Slash and Steal Pets
-    Fix: Bắt pet lại + cố gắng lên map cuối + về base chậm
+    + Set Home + Set Map Cuối
+    + Chỉ về base khi bắt được pet
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -17,14 +18,16 @@ local S = {
     AutoSlash = false,
     AutoSteal = false,
     MinIncome = 20000000,
-    SlashRange = 80,      -- tăng tầm tìm trứng
-    StealRange = 70,
+    SlashRange = 90,
+    StealRange = 60,
     BringHome = true,
-    Speed = 65,           -- tốc độ di chuyển
-    ReturnSpeed = 50,     -- về base chậm hơn
+    Speed = 60,
+    ReturnSpeed = 45,
 }
 
 local savedHome = nil
+local savedEndMap = nil
+local carrying = false
 
 local function getRoot()
     local char = lp.Character
@@ -40,10 +43,10 @@ local function tweenTo(pos, speed)
     local root = getRoot()
     if not root or not pos then return end
     local dist = (root.Position - pos).Magnitude
-    if dist < 6 then return end
-    local t = math.clamp(dist / (speed or S.Speed), 0.3, 5)
+    if dist < 7 then return end
+    local t = math.clamp(dist / (speed or S.Speed), 0.4, 6)
     local tw = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
-        CFrame = CFrame.new(pos + Vector3.new(0, 3.5, 0))
+        CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
     })
     tw:Play()
     tw.Completed:Wait()
@@ -71,41 +74,34 @@ local function firePrompts(obj)
     end)
 end
 
--- ==================== HOME ====================
 local function setHomeHere()
     local root = getRoot()
-    if root then
-        savedHome = root.Position
-        return true
-    end
+    if root then savedHome = root.Position return true end
+    return false
+end
+
+local function setEndMapHere()
+    local root = getRoot()
+    if root then savedEndMap = root.Position return true end
     return false
 end
 
 local function getHome()
-    if savedHome then return savedHome end
-    local root = getRoot()
-    return root and root.Position or Vector3.new(0, 10, 0)
+    return savedHome or (getRoot() and getRoot().Position)
 end
 
--- ==================== EGG (ưu tiên xa hơn = map cuối) ====================
-local function findBestEgg()
+local function findEgg()
     local root = getRoot()
     if not root then return nil end
-
-    local best, bestScore = nil, -1
+    local best, bestD = nil, S.SlashRange
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("Model") or obj:IsA("BasePart") then
             local name = obj.Name:lower()
             if name:find("egg") or obj:GetAttribute("Egg") or obj:HasTag("Egg") then
                 local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
-                local dist = (root.Position - pos).Magnitude
-                if dist < S.SlashRange then
-                    -- Ưu tiên trứng xa hơn (thường là map cuối)
-                    local score = dist
-                    if score > bestScore then
-                        bestScore = score
-                        best = obj
-                    end
+                local d = (root.Position - pos).Magnitude
+                if d < bestD then
+                    best, bestD = obj, d
                 end
             end
         end
@@ -113,21 +109,20 @@ local function findBestEgg()
     return best
 end
 
--- ==================== PET ====================
-local function parseIncome(text)
-    if not text then return 0 end
-    text = tostring(text):lower():gsub(",", ""):gsub("%$", ""):gsub("%s", "")
-    local num, suf = text:match("([%d%.]+)([kmb]?)")
-    if not num then return 0 end
-    num = tonumber(num) or 0
-    if suf == "k" then return num * 1e3 end
-    if suf == "m" then return num * 1e6 end
-    if suf == "b" then return num * 1e9 end
-    return num
+local function parseIncome(t)
+    if not t then return 0 end
+    t = tostring(t):lower():gsub(",",""):gsub("%$",""):gsub("%s","")
+    local n, s = t:match("([%d%.]+)([kmb]?)")
+    if not n then return 0 end
+    n = tonumber(n) or 0
+    if s == "k" then return n*1e3 end
+    if s == "m" then return n*1e6 end
+    if s == "b" then return n*1e9 end
+    return n
 end
 
 local function getIncome(obj)
-    for _, a in ipairs({"Income","MoneyPerSecond","Value","MPS","Earnings","Gen","Money","CashPerSec"}) do
+    for _, a in ipairs({"Income","MoneyPerSecond","Value","MPS","Earnings","Gen","Money"}) do
         local v = obj:GetAttribute(a)
         if type(v) == "number" and v > 0 then return v end
         if type(v) == "string" then
@@ -144,22 +139,19 @@ local function getIncome(obj)
     return 0
 end
 
-local function findBestPet()
+local function findPet()
     local root = getRoot()
     if not root then return nil end
-
     local best, bestInc, bestD = nil, 0, S.StealRange
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("Model") or obj:IsA("BasePart") then
-            local name = obj.Name:lower()
             local inc = getIncome(obj)
+            local name = obj.Name:lower()
             if (name:find("pet") or obj:GetAttribute("Pet") or obj:HasTag("Pet") or inc > 0) and inc >= S.MinIncome then
                 local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
                 local d = (root.Position - pos).Magnitude
-                if d < bestD or (inc > bestInc and d < S.StealRange * 2.5) then
-                    best = obj
-                    bestInc = inc
-                    bestD = d
+                if d < bestD or (inc > bestInc and d < S.StealRange*2) then
+                    best, bestInc, bestD = obj, inc, d
                 end
             end
         end
@@ -167,67 +159,64 @@ local function findBestPet()
     return best
 end
 
--- ==================== LOOPS ====================
 local function autoSlashLoop()
     while S.AutoSlash do
-        local egg = findBestEgg()
+        if savedEndMap then
+            local root = getRoot()
+            if root and (root.Position - savedEndMap).Magnitude > 40 then
+                tweenTo(savedEndMap, S.Speed)
+            end
+        end
+        local egg = findEgg()
         if egg then
             local pos = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
             tweenTo(pos, S.Speed)
-            spamClick(14)
+            spamClick(12)
             firePrompts(egg)
             local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
             if tool then pcall(function() tool:Activate() end) end
-        else
-            -- Không thấy trứng gần → thử đi thẳng về phía trước (map cuối)
-            local root = getRoot()
-            if root then
-                local forward = root.CFrame.LookVector * 40
-                tweenTo(root.Position + forward, S.Speed)
-            end
         end
-        task.wait(0.25)
+        task.wait(0.3)
     end
 end
 
 local function autoStealLoop()
     while S.AutoSteal do
-        local pet = findBestPet()
+        local pet = findPet()
         if pet then
             local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
-            tweenTo(pos, S.Speed + 10)
-            task.wait(0.15)
+            tweenTo(pos, S.Speed + 8)
+            task.wait(0.2)
             firePrompts(pet)
-            spamClick(6)
-
+            spamClick(8)
             local prompt = pet:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt then
-                pcall(fireproximityprompt, prompt)
-            end
-
-            task.wait(0.4)
-
-            -- Về base chậm
-            if S.BringHome then
+            if prompt then pcall(fireproximityprompt, prompt) end
+            task.wait(0.5)
+            carrying = true
+            if S.BringHome and carrying then
                 local home = getHome()
-                tweenTo(home, S.ReturnSpeed)
-                task.wait(0.3)
-                firePrompts(workspace)
+                if home then
+                    tweenTo(home, S.ReturnSpeed)
+                    task.wait(0.4)
+                    firePrompts(workspace)
+                end
+                carrying = false
             end
+        else
+            task.wait(0.6)
         end
-        task.wait(0.4)
+        task.wait(0.35)
     end
 end
 
--- ==================== UI ====================
 local gui = Instance.new("ScreenGui")
 gui.Name = "KietSlashHub"
 gui.ResetOnSpawn = false
 gui.Parent = lp:WaitForChild("PlayerGui")
 
 local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(280, 350)
-main.Position = UDim2.new(0, 12, 0.5, -175)
+main.Size = UDim2.fromOffset(290, 400)
+main.Position = UDim2.new(0, 10, 0.5, -200)
 main.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
 main.BorderSizePixel = 0
 main.Parent = gui
@@ -237,7 +226,7 @@ st.Color = Color3.fromRGB(0, 190, 255)
 st.Thickness = 1.5
 
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 36)
+title.Size = UDim2.new(1, 0, 0, 34)
 title.BackgroundTransparency = 1
 title.Text = "Kiet Hub | Slash Pets"
 title.TextColor3 = Color3.fromRGB(0, 200, 255)
@@ -247,15 +236,15 @@ title.Parent = main
 
 local function makeToggle(text, y, key, cb)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -24, 0, 34)
-    btn.Position = UDim2.new(0, 12, 0, y)
+    btn.Size = UDim2.new(1, -20, 0, 32)
+    btn.Position = UDim2.new(0, 10, 0, y)
     btn.BackgroundColor3 = Color3.fromRGB(30, 32, 42)
     btn.Text = text .. ": OFF"
     btn.TextColor3 = Color3.fromRGB(230, 230, 240)
     btn.Font = Enum.Font.GothamMedium
     btn.TextSize = 13
     btn.Parent = main
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
     btn.MouseButton1Click:Connect(function()
         S[key] = not S[key]
         btn.Text = text .. ": " .. (S[key] and "ON" or "OFF")
@@ -264,36 +253,57 @@ local function makeToggle(text, y, key, cb)
     end)
 end
 
-makeToggle("Auto Slash Egg", 48, "AutoSlash", autoSlashLoop)
-makeToggle("Auto Steal Pet", 90, "AutoSteal", autoStealLoop)
-makeToggle("Bring Home", 132, "BringHome")
+makeToggle("Auto Slash Egg", 42, "AutoSlash", autoSlashLoop)
+makeToggle("Auto Steal Pet", 80, "AutoSteal", autoStealLoop)
+makeToggle("Bring Home", 118, "BringHome")
 
-local setHomeBtn = Instance.new("TextButton")
-setHomeBtn.Size = UDim2.new(1, -24, 0, 34)
-setHomeBtn.Position = UDim2.new(0, 12, 0, 174)
-setHomeBtn.BackgroundColor3 = Color3.fromRGB(40, 60, 40)
-setHomeBtn.Text = "Set Home (Đứng ở base bấm)"
-setHomeBtn.TextColor3 = Color3.fromRGB(180, 255, 180)
-setHomeBtn.Font = Enum.Font.GothamMedium
-setHomeBtn.TextSize = 12
-setHomeBtn.Parent = main
-Instance.new("UICorner", setHomeBtn).CornerRadius = UDim.new(0, 8)
-setHomeBtn.MouseButton1Click:Connect(function()
+local btnHome = Instance.new("TextButton")
+btnHome.Size = UDim2.new(1, -20, 0, 32)
+btnHome.Position = UDim2.new(0, 10, 0, 160)
+btnHome.BackgroundColor3 = Color3.fromRGB(35, 55, 40)
+btnHome.Text = "Set Home (Đứng ở base)"
+btnHome.TextColor3 = Color3.fromRGB(170, 255, 170)
+btnHome.Font = Enum.Font.GothamMedium
+btnHome.TextSize = 12
+btnHome.Parent = main
+Instance.new("UICorner", btnHome).CornerRadius = UDim.new(0, 7)
+btnHome.MouseButton1Click:Connect(function()
     if setHomeHere() then
-        setHomeBtn.Text = "Home Saved!"
-        setHomeBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 80)
-        task.delay(1.5, function()
-            setHomeBtn.Text = "Set Home (Đứng ở base bấm)"
-            setHomeBtn.BackgroundColor3 = Color3.fromRGB(40, 60, 40)
+        btnHome.Text = "Home Saved!"
+        btnHome.BackgroundColor3 = Color3.fromRGB(0, 130, 70)
+        task.delay(1.2, function()
+            btnHome.Text = "Set Home (Đứng ở base)"
+            btnHome.BackgroundColor3 = Color3.fromRGB(35, 55, 40)
+        end)
+    end
+end)
+
+local btnEnd = Instance.new("TextButton")
+btnEnd.Size = UDim2.new(1, -20, 0, 32)
+btnEnd.Position = UDim2.new(0, 10, 0, 200)
+btnEnd.BackgroundColor3 = Color3.fromRGB(55, 40, 35)
+btnEnd.Text = "Set Map Cuối (Đứng ở map cuối)"
+btnEnd.TextColor3 = Color3.fromRGB(255, 200, 160)
+btnEnd.Font = Enum.Font.GothamMedium
+btnEnd.TextSize = 12
+btnEnd.Parent = main
+Instance.new("UICorner", btnEnd).CornerRadius = UDim.new(0, 7)
+btnEnd.MouseButton1Click:Connect(function()
+    if setEndMapHere() then
+        btnEnd.Text = "Map Cuối Saved!"
+        btnEnd.BackgroundColor3 = Color3.fromRGB(160, 90, 40)
+        task.delay(1.2, function()
+            btnEnd.Text = "Set Map Cuối (Đứng ở map cuối)"
+            btnEnd.BackgroundColor3 = Color3.fromRGB(55, 40, 35)
         end)
     end
 end)
 
 local info = Instance.new("TextLabel")
-info.Size = UDim2.new(1, -24, 0, 80)
-info.Position = UDim2.new(0, 12, 0, 220)
+info.Size = UDim2.new(1, -20, 0, 100)
+info.Position = UDim2.new(0, 10, 0, 245)
 info.BackgroundTransparency = 1
-info.Text = "1. Vào base → Set Home\n2. Bật Auto Slash / Steal\n3. Icon K ẩn/hiện UI\nVề base chậm hơn"
+info.Text = "1. Đứng base → Set Home\n2. Chạy lên map cuối → Set Map Cuối\n3. Bật Auto Slash + Auto Steal\nChỉ về base khi bắt được pet"
 info.TextColor3 = Color3.fromRGB(140, 150, 170)
 info.Font = Enum.Font.Gotham
 info.TextSize = 12
@@ -301,7 +311,6 @@ info.TextWrapped = true
 info.TextYAlignment = Enum.TextYAlignment.Top
 info.Parent = main
 
--- Icon
 local icon = Instance.new("TextButton")
 icon.Size = UDim2.fromOffset(46, 46)
 icon.Position = UDim2.new(1, -58, 0, 70)
@@ -316,25 +325,24 @@ icon.MouseButton1Click:Connect(function()
     main.Visible = not main.Visible
 end)
 
--- Drag
-local dragging, startPos, startInput
+local drag, sPos, sInput
 main.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        startPos = main.Position
-        startInput = i.Position
+        drag = true
+        sPos = main.Position
+        sInput = i.Position
     end
 end)
 main.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-        dragging = false
+        drag = false
     end
 end)
 UserInputService.InputChanged:Connect(function(i)
-    if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-        local d = i.Position - startInput
-        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - sInput
+        main.Position = UDim2.new(sPos.X.Scale, sPos.X.Offset + d.X, sPos.Y.Scale, sPos.Y.Offset + d.Y)
     end
 end)
 
-print("[Kiet Hub] Fixed - Pet catch + go further + slow return")
+print("[Kiet Hub] Set Home + Set Map Cuối ready")
