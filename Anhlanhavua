@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub v9 - Slash and Steal Pets (Take pet từ WorldPet)
+    Kiet Hub v11 - Slash and Steal Pets (Take pet từ WorldPet)
     - UI mới: 3 tab (Farm / Setup / Log), có log trạng thái
     - Steal: kiểm tra có nhận được pet (tool mới trong Backpack) hay chưa
     - Place: đặt pet về base (thử prompt có chữ place/đặt trong base của bạn)
@@ -30,7 +30,9 @@ local S = {
     MinIncome = 20e6,
     MinEggHP = 0, -- chỉ chém egg có máu >= giá trị này (0 = chém hết)
     Speed = 55,
-    ReturnSpeed = 40,
+    ReturnSpeed = 100,
+    ReturnMode = "tele", -- tele = nhảy theo bước | tween = chạy mượt
+    TeleStep = 150,      -- stud mỗi lần nhảy khi tele
 }
 
 local alive = true
@@ -41,6 +43,7 @@ local tried = {}
 local conns = {}
 local stats = { eggs = 0, pets = 0 }
 local carry = { active = false, lost = false, reason = nil, uid = nil }
+local moving = { tele = false, untilT = 0 }
 
 ----------------------------------------------------------------
 -- Log / status (UI gán sau)
@@ -106,12 +109,22 @@ local function tweenDirect(pos, speed)
     local dist = (root.Position - pos).Magnitude
     if dist < 8 then return end
     local t = math.max(dist / (speed or S.Speed), 0.15)
-    curTween = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
+    local tw = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
         CFrame = CFrame.new(pos + Vector3.new(0, 3, 0)),
     })
-    curTween:Play()
-    curTween.Completed:Wait()
-    curTween = nil
+    curTween = tw
+    local done = false
+    local c = tw.Completed:Connect(function() done = true end)
+    tw:Play()
+    local t0 = os.clock()
+    -- chờ xong, nhưng thoát nếu nhân vật bị thay (respawn/reset) hoặc quá giờ
+    while not done and alive and os.clock() - t0 < t + 1.5 do
+        if getRoot() ~= root then break end
+        task.wait(0.1)
+    end
+    c:Disconnect()
+    if not done then tw:Cancel() end
+    if curTween == tw then curTween = nil end
 end
 
 -- mode: "vertical" (dọc, Z trước rồi X) | "horizontal" (ngang, X trước rồi Z) | "straight"/nil (đi thẳng)
@@ -132,6 +145,27 @@ local function tweenTo(pos, speed, mode)
         end
     end
     tweenDirect(pos, speed)
+end
+
+-- Tele theo bước: mỗi 0.05s nhảy tối đa S.TeleStep stud về phía đích (rất nhanh, boss không rượt kịp)
+local function teleportTo(pos)
+    if not pos or not alive then return end
+    local target = pos + Vector3.new(0, 3, 0)
+    moving.tele = true
+    while alive do
+        local root = getRoot()
+        if not root then break end
+        local delta = target - root.Position
+        local d = delta.Magnitude
+        if d <= 6 then break end
+        local len = math.min(d, math.max(S.TeleStep, 20))
+        root.CFrame = CFrame.new(root.Position + delta.Unit * len)
+        root.AssemblyLinearVelocity = Vector3.zero
+        task.wait(0.05)
+        if carry.active and carry.lost then break end
+    end
+    moving.tele = false
+    moving.untilT = os.clock() + 0.6
 end
 
 local MULT = { k = 1e3, m = 1e6, b = 1e9, t = 1e12 }
@@ -257,6 +291,19 @@ local function markLost(reason)
     end
 end
 
+local resetInfo = { at = 0 }
+
+-- Map reset / bị ép về điểm xuất phát: huỷ tween, bỏ pet đang mang, chờ tải lại rồi chạy lại từ đầu
+local function onMapReset(reason)
+    if os.clock() - resetInfo.at < 5 then return end
+    resetInfo.at = os.clock()
+    log("Map reset / bị đưa về điểm xuất phát: " .. tostring(reason))
+    setStatus("Map reset, chạy lại")
+    markLost("map reset")
+    if curTween then curTween:Cancel() end
+    for k in pairs(tried) do tried[k] = nil end
+end
+
 local function hookCharacter(char)
     local hum = char:WaitForChild("Humanoid", 5)
     if not hum then return end
@@ -273,7 +320,10 @@ local function hookCharacter(char)
     end)
 end
 if lp.Character then task.spawn(hookCharacter, lp.Character) end
-conns[#conns + 1] = lp.CharacterAdded:Connect(function(c) task.spawn(hookCharacter, c) end)
+conns[#conns + 1] = lp.CharacterAdded:Connect(function(c)
+    task.spawn(hookCharacter, c)
+    if S.AutoSlash or S.AutoSteal then onMapReset("nhân vật hồi sinh") end
+end)
 
 local function startCarry(uid)
     carry.active, carry.lost, carry.reason, carry.uid = true, false, nil, uid
@@ -298,6 +348,25 @@ end
 local function stopCarry()
     carry.active = false
 end
+
+-- Phát hiện bị teleport: vị trí nhảy > 120 stud trong 0.25s (tween của mình không bao giờ nhanh vậy)
+task.spawn(function()
+    local last
+    while alive do
+        local root = getRoot()
+        if root then
+            local pos = root.Position
+            if last and (S.AutoSlash or S.AutoSteal) and not moving.tele and os.clock() > moving.untilT
+                and (pos - last).Magnitude > 120 then
+                onMapReset(("vị trí nhảy %d stud"):format((pos - last).Magnitude))
+            end
+            last = pos
+        else
+            last = nil
+        end
+        task.wait(0.25)
+    end
+end)
 
 ----------------------------------------------------------------
 -- Take pet: egg nở thành WorldPet, prompt "TakeEgg" (Take pet, giữ 1s)
@@ -412,7 +481,11 @@ local function afterTake(ok, tool, before, uid)
     local home = savedHome or startPos
     if home then
         setStatus("Chạy về điểm nhận pet")
-        tweenTo(home, S.ReturnSpeed, S.Path)
+        if S.ReturnMode == "tele" then
+            teleportTo(home)
+        else
+            tweenTo(home, S.ReturnSpeed, S.Path)
+        end
     end
     local got = tool or newTool(before)
     if not got and not carry.lost then
@@ -553,6 +626,10 @@ end
 -- Main loop
 ----------------------------------------------------------------
 local function step()
+    local since = os.clock() - resetInfo.at
+    if since < 3 then
+        task.wait(3 - since)
+    end
     if not getRoot() then return end
     if S.AutoSteal and stealOnce() then return end
     if S.AutoSlash then slashOnce() end
@@ -679,6 +756,9 @@ local function hookRemote(name)
         for i = 1, select("#", ...) do parts[#parts + 1] = argToText((select(i, ...))) end
         local msg = table.concat(parts, " | ")
         recAdd(name .. ": " .. msg)
+        if msg:lower():find("reset", 1, true) and (S.AutoSlash or S.AutoSteal) then
+            onMapReset(name .. ": " .. msg)
+        end
         if carry.active then
             log(name .. ": " .. msg)
             local low = msg:lower()
@@ -1004,9 +1084,9 @@ statsLabel = mk("TextLabel", {
 updateStats()
 
 mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 120),
+    Size = UDim2.new(1, 0, 0, 140),
     BackgroundTransparency = 1,
-    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg (ưu tiên khu Map Cuối nếu đã Set, chỉ egg đủ máu)\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nVào base: tự bấm Trang bị",
+    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg (ưu tiên khu Map Cuối nếu đã Set, chỉ egg đủ máu)\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nMap reset: tự phát hiện, chạy lại map cuối\nVào base: tự bấm Trang bị",
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top,
@@ -1017,9 +1097,14 @@ mk("TextLabel", {
 
 -- Trang Setup
 local setup = listPage("Setup")
-inputRow(setup, "Tốc độ bay", function() return S.Speed end, function(v)
-    S.Speed = math.clamp(v, 10, 150)
-    S.ReturnSpeed = math.max(S.Speed - 15, 10)
+inputRow(setup, "Tốc độ đi (tween)", function() return S.Speed end, function(v)
+    S.Speed = math.clamp(v, 10, 1000)
+end)
+inputRow(setup, "Tốc độ về (tween)", function() return S.ReturnSpeed end, function(v)
+    S.ReturnSpeed = math.clamp(v, 10, 2000)
+end)
+inputRow(setup, "Bước tele (stud)", function() return S.TeleStep end, function(v)
+    S.TeleStep = math.clamp(v, 20, 5000)
 end)
 actionButton(setup, "Set Home (đứng ở điểm nhận pet)", C.ok, function()
     local r = getRoot()
@@ -1036,6 +1121,11 @@ actionButton(setup, "Set Map Cuối (đứng map cuối)", C.warn, function()
         log("Đã lưu Map Cuối")
         return "Đã lưu Map Cuối ✓"
     end
+end)
+local MODE_LABEL = { tele = "Tele (nhảy theo bước)", tween = "Tween (chạy mượt)" }
+actionButton(setup, "Kiểu chạy về: " .. MODE_LABEL[S.ReturnMode], C.warn, function(b)
+    S.ReturnMode = (S.ReturnMode == "tele") and "tween" or "tele"
+    b.Text = "Kiểu chạy về: " .. MODE_LABEL[S.ReturnMode]
 end)
 local PATH_LABEL = { vertical = "Dọc (Z trước)", horizontal = "Ngang (X trước)", straight = "Thẳng" }
 local PATH_NEXT = { vertical = "horizontal", horizontal = "straight", straight = "vertical" }
@@ -1152,5 +1242,5 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v9 sẵn sàng")
-print("[Kiet Hub] v9 loaded")
+log("Kiet Hub v11 sẵn sàng")
+print("[Kiet Hub] v11 loaded")
