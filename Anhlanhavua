@@ -1,10 +1,9 @@
 --[[
-    Kiet Hub v2 - Slash and Steal Pets
-    Dựa trên dump game 115857984676006
-    - Steal: tag SAE_PetUnplacePrompt + attribute SAE_OwnerUserId (loại pet của mình)
-    - Income: đọc label "$xx/s" (attribute Income KHÔNG khớp số hiển thị)
-    - Slash: tag SAE_WorldEgg + attribute SAE_EggHP, tự equip vũ khí (Cyber Scythe...)
-    - 1 vòng lặp duy nhất (không tranh nhau tween), có pcall
+    Kiet Hub v3 - Slash and Steal Pets
+    - UI mới: 3 tab (Farm / Setup / Log), có log trạng thái
+    - Steal: kiểm tra có nhận được pet (tool mới trong Backpack) hay chưa
+    - Place: đặt pet về base (thử prompt có chữ place/đặt trong base của bạn)
+    - Dump Info + Ghi lại thao tác: để lấy dữ liệu cách đặt pet nếu auto place chưa chạy
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -13,6 +12,7 @@ local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
 
 local lp = Players.LocalPlayer
 local playerGui = lp:WaitForChild("PlayerGui")
@@ -29,10 +29,50 @@ local S = {
     ReturnSpeed = 40,
 }
 
+local alive = true
 local savedHome, savedEndMap, startPos
 local looping = false
 local curTween = nil
 local tried = {}
+local conns = {}
+local stats = { eggs = 0, pets = 0 }
+
+----------------------------------------------------------------
+-- Log / status (UI gán sau)
+----------------------------------------------------------------
+local logLines = {}
+local logLabel, logScroll, statusLabel, statsLabel
+
+local function log(msg)
+    logLines[#logLines + 1] = os.date("%H:%M:%S ") .. tostring(msg)
+    if #logLines > 120 then table.remove(logLines, 1) end
+    if logLabel then
+        logLabel.Text = table.concat(logLines, "\n")
+        task.defer(function()
+            if logScroll then logScroll.CanvasPosition = Vector2.new(0, 1e5) end
+        end)
+    end
+end
+
+local function setStatus(s)
+    if statusLabel then statusLabel.Text = "Trạng thái: " .. s end
+end
+
+local function updateStats()
+    if statsLabel then
+        statsLabel.Text = ("Egg đã chém: %d  |  Pet đã lấy: %d"):format(stats.eggs, stats.pets)
+    end
+end
+
+local function copyText(s)
+    local f = setclipboard or toclipboard
+    if f then
+        local ok = pcall(f, s)
+        if ok then return true end
+    end
+    print(s)
+    return false
+end
 
 ----------------------------------------------------------------
 -- Helpers
@@ -57,7 +97,7 @@ end
 
 local function tweenTo(pos, speed)
     local root = getRoot()
-    if not root or not pos then return end
+    if not root or not pos or not alive then return end
     local dist = (root.Position - pos).Magnitude
     if dist < 8 then return end
     local t = math.max(dist / (speed or S.Speed), 0.15)
@@ -79,7 +119,14 @@ local function parseIncome(text)
     return n * (MULT[suf] or 1)
 end
 
--- Chỉ đọc label có "/s" để không nhầm với label giá tiền
+local function fmtNum(n)
+    if n >= 1e12 then return ("%.2fT"):format(n / 1e12) end
+    if n >= 1e9 then return ("%.2fB"):format(n / 1e9) end
+    if n >= 1e6 then return ("%.2fM"):format(n / 1e6) end
+    if n >= 1e3 then return ("%.2fK"):format(n / 1e3) end
+    return tostring(math.floor(n))
+end
+
 local function petIncome(pet)
     local best = 0
     for _, d in ipairs(pet:GetDescendants()) do
@@ -104,6 +151,168 @@ local function petOf(prompt)
     return nil
 end
 
+local function ancestorWithTag(inst, tag)
+    local m = inst
+    while m and m ~= workspace and m ~= game do
+        if CollectionService:HasTag(m, tag) then return m end
+        m = m.Parent
+    end
+    return nil
+end
+
+local function plotCenter(p)
+    if p:IsA("Model") then return p:GetPivot().Position end
+    if p:IsA("BasePart") then return p.Position end
+    local part = p:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.Position or nil
+end
+
+local function attrs(inst)
+    local t = {}
+    for k, v in pairs(inst:GetAttributes()) do t[#t + 1] = k .. "=" .. tostring(v) end
+    table.sort(t)
+    return table.concat(t, ", ")
+end
+
+-- Base của mình: ưu tiên theo pet đang đặt (SAE_OwnerUserId), không có thì lấy plot gần Home nhất
+local function getMyPlot()
+    local myId = tostring(lp.UserId)
+    for _, tagged in ipairs(CollectionService:GetTagged("SAE_PetUnplacePrompt")) do
+        local pr = asPrompt(tagged)
+        if pr and tostring(pr:GetAttribute("SAE_OwnerUserId")) == myId then
+            local plot = ancestorWithTag(pr, "SAE_Plot")
+            if plot then return plot end
+        end
+    end
+    if savedHome then
+        local best, bd = nil, math.huge
+        for _, plot in ipairs(CollectionService:GetTagged("SAE_Plot")) do
+            local c = plotCenter(plot)
+            if c then
+                local d = (c - savedHome).Magnitude
+                if d < bd then best, bd = plot, d end
+            end
+        end
+        return best
+    end
+    return nil
+end
+
+----------------------------------------------------------------
+-- Tool tracking (pet nhận được = tool mới trong Backpack)
+----------------------------------------------------------------
+local function snapshotTools()
+    local set = {}
+    local bp = lp:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do set[t] = true end
+    end
+    local ch = lp.Character
+    if ch then
+        for _, t in ipairs(ch:GetChildren()) do
+            if t:IsA("Tool") then set[t] = true end
+        end
+    end
+    return set
+end
+
+local function newTool(before)
+    local bp = lp:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") and not before[t] then return t end
+        end
+    end
+    local ch = lp.Character
+    if ch then
+        for _, t in ipairs(ch:GetChildren()) do
+            if t:IsA("Tool") and not before[t] then return t end
+        end
+    end
+    return nil
+end
+
+local function waitNewTool(before, timeout)
+    local t0 = os.clock()
+    repeat
+        local t = newTool(before)
+        if t then return t end
+        task.wait(0.1)
+    until os.clock() - t0 >= timeout
+    return nil
+end
+
+----------------------------------------------------------------
+-- Place pet về base
+----------------------------------------------------------------
+local PLACE_WORDS = { "place", "put", "đặt", "dat ", "drop", "deposit" }
+local BAD_WORDS = { "unplace", "pick", "steal", "take", "buy", "sell", "upgrade" }
+
+local function looksLikePlace(prompt)
+    local s = (prompt.ActionText .. " " .. prompt.ObjectText):lower()
+    for _, w in ipairs(BAD_WORDS) do
+        if s:find(w, 1, true) then return false end
+    end
+    for _, w in ipairs(PLACE_WORDS) do
+        if s:find(w, 1, true) then return true end
+    end
+    return false
+end
+
+local function placePet(tool)
+    setStatus("Đang đặt pet về base")
+    local plot = getMyPlot()
+    local home = savedHome or (plot and plotCenter(plot)) or startPos
+    if not plot then
+        log("Không xác định được base của bạn. Hãy bấm 'Set Home' khi đứng ở base.")
+    end
+
+    local char = lp.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and tool.Parent ~= char then
+        hum:EquipTool(tool)
+        task.wait(0.25)
+    end
+    tweenTo(home, S.ReturnSpeed)
+    if not plot then return false end
+
+    local function gone()
+        return tool.Parent ~= lp.Character and tool.Parent ~= lp:FindFirstChildOfClass("Backpack")
+    end
+
+    local root = getRoot()
+    local cands = {}
+    for _, d in ipairs(plot:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Enabled and looksLikePlace(d) then
+            local pos = getPos(d.Parent)
+            if pos and root then
+                cands[#cands + 1] = { p = d, pos = pos, dist = (root.Position - pos).Magnitude }
+            end
+        end
+    end
+    table.sort(cands, function(a, b) return a.dist < b.dist end)
+
+    if #cands == 0 then
+        log("Không thấy prompt 'place/đặt' trong base. Dùng tab Setup > Ghi lại thao tác để gửi cách đặt pet.")
+        return false
+    end
+
+    for i = 1, math.min(#cands, 4) do
+        local c = cands[i]
+        tweenTo(c.pos, S.ReturnSpeed)
+        pcall(function() c.p.HoldDuration = 0 end)
+        pcall(fireproximityprompt, c.p)
+        task.wait(0.5)
+        log("Thử prompt: " .. c.p:GetFullName())
+        if gone() then
+            log("Đặt pet thành công")
+            return true
+        end
+    end
+    log("Đã thử nhưng pet vẫn còn trong túi")
+    return false
+end
+
 ----------------------------------------------------------------
 -- Steal
 ----------------------------------------------------------------
@@ -120,7 +329,7 @@ local function findBestTarget()
             if pet and owner ~= nil and tostring(owner) ~= myId then
                 local inc = petIncome(pet)
                 if inc >= S.MinIncome and inc > bestInc then
-                    best, bestInc = { pet = pet, prompt = prompt }, inc
+                    best, bestInc = { pet = pet, prompt = prompt, inc = inc, owner = owner }, inc
                 end
             end
         end
@@ -131,24 +340,55 @@ end
 local function stealOnce()
     local target = findBestTarget()
     if not target then return false end
-    local prompt = target.prompt
+    local prompt, pet = target.prompt, target.pet
     tried[prompt] = os.clock()
 
-    tweenTo(getPos(target.pet), S.Speed + 5)
+    setStatus("Đang tới " .. pet.Name)
+    log(("Target: %s (%s/s) chủ %s"):format(pet.Name, fmtNum(target.inc), tostring(target.owner)))
+    tweenTo(getPos(pet), S.Speed + 5)
     if not S.AutoSteal then return true end
 
+    setStatus("Đang lấy pet")
+    local before = snapshotTools()
+    local origHold = prompt.HoldDuration
+    local got
+
+    -- Cách 1: fireproximityprompt
     pcall(function()
         prompt.HoldDuration = 0
         prompt.RequiresLineOfSight = false
     end)
     for _ = 1, 3 do
-        if not prompt:IsDescendantOf(workspace) or not prompt.Enabled then break end
+        if not prompt:IsDescendantOf(workspace) then break end
         pcall(fireproximityprompt, prompt)
-        task.wait(0.25)
+        got = waitNewTool(before, 0.8)
+        if got then break end
     end
 
+    -- Cách 2: giữ prompt thật theo HoldDuration gốc
+    if not got and prompt:IsDescendantOf(workspace) then
+        log("fireproximityprompt không ăn, thử giữ prompt thật...")
+        pcall(function() prompt.HoldDuration = origHold end)
+        pcall(function() prompt:InputHoldBegin() end)
+        task.wait(origHold + 0.2)
+        pcall(function() prompt:InputHoldEnd() end)
+        got = waitNewTool(before, 1.2)
+    end
+
+    if got then
+        stats.pets += 1
+        log("Đã nhận pet: " .. got.Name)
+    else
+        log("Chưa nhận được pet (không có tool mới trong Backpack)")
+    end
+    updateStats()
+
     if S.BringHome then
-        tweenTo(savedHome or startPos, S.ReturnSpeed)
+        if got then
+            placePet(got)
+        else
+            tweenTo(savedHome or startPos, S.ReturnSpeed)
+        end
     end
     return true
 end
@@ -201,26 +441,35 @@ local function slashOnce()
     if not root then return end
     local egg = findEgg()
     if not egg then
+        setStatus("Chờ egg")
         if savedEndMap and (root.Position - savedEndMap).Magnitude > 45 then
             tweenTo(savedEndMap, S.Speed)
         end
         return
     end
     local tool = equipWeapon()
-    if not tool then return end
+    if not tool then
+        setStatus("Không có vũ khí trong túi")
+        return
+    end
+    setStatus("Đang chém egg")
     tweenTo(getPos(egg), S.Speed)
     local n = 0
-    while S.AutoSlash and n < 40 and getRoot()
+    while alive and S.AutoSlash and n < 40 and getRoot()
         and egg:IsDescendantOf(workspace)
         and (egg:GetAttribute("SAE_EggHP") or 0) > 0 do
         pcall(function() tool:Activate() end)
         n += 1
         task.wait(0.15)
     end
+    if not egg:IsDescendantOf(workspace) or (egg:GetAttribute("SAE_EggHP") or 0) <= 0 then
+        stats.eggs += 1
+        updateStats()
+    end
 end
 
 ----------------------------------------------------------------
--- Main loop (duy nhất)
+-- Main loop
 ----------------------------------------------------------------
 local function step()
     if not getRoot() then return end
@@ -233,12 +482,18 @@ local function mainLoop()
     looping = true
     local r = getRoot()
     startPos = r and r.Position or startPos
-    while S.AutoSlash or S.AutoSteal do
+    log("Bắt đầu chạy")
+    while alive and (S.AutoSlash or S.AutoSteal) do
         local ok, err = pcall(step)
-        if not ok then warn("[Kiet Hub] " .. tostring(err)) end
+        if not ok then
+            warn("[Kiet Hub] " .. tostring(err))
+            log("LỖI: " .. tostring(err))
+        end
         task.wait(0.3)
     end
     looping = false
+    setStatus("Idle")
+    log("Đã dừng")
 end
 
 local function refresh()
@@ -250,155 +505,522 @@ local function refresh()
 end
 
 ----------------------------------------------------------------
+-- Dump info + Recorder
+----------------------------------------------------------------
+local function describePrompt(p)
+    local m = p.Parent
+    while m and not m:IsA("Model") and m ~= workspace do m = m.Parent end
+    return ("%s | Action='%s' Object='%s' Hold=%s Dist=%s Enabled=%s | attrs{%s} | model=%s attrs{%s}"):format(
+        p:GetFullName(), p.ActionText, p.ObjectText, tostring(p.HoldDuration),
+        tostring(p.MaxActivationDistance), tostring(p.Enabled), attrs(p),
+        m and m:GetFullName() or "?", m and attrs(m) or "")
+end
+
+local function dumpInfo()
+    local out = {}
+    local function add(s) out[#out + 1] = s end
+    local root = getRoot()
+
+    add("== SELF ==")
+    add("UserId=" .. lp.UserId .. " pos=" .. tostring(root and root.Position) .. " savedHome=" .. tostring(savedHome))
+
+    add("== PLOTS (tag SAE_Plot) ==")
+    for _, p in ipairs(CollectionService:GetTagged("SAE_Plot")) do
+        add(p:GetFullName() .. " | " .. p.ClassName .. " | " .. attrs(p))
+    end
+
+    add("== SAE_BaseOwnerTag ==")
+    for _, c in ipairs(workspace:GetChildren()) do
+        if c.Name == "SAE_BaseOwnerTag" then
+            add(c:GetFullName() .. " | pos=" .. tostring(getPos(c)) .. " | " .. attrs(c))
+        end
+    end
+
+    add("== NESTS (5 đầu, tag SAE_Nest) ==")
+    for i, n in ipairs(CollectionService:GetTagged("SAE_Nest")) do
+        if i > 5 then break end
+        add(n:GetFullName() .. " | " .. n.ClassName .. " | " .. attrs(n))
+        for _, d in ipairs(n:GetDescendants()) do
+            if d:IsA("ProximityPrompt") then add("   " .. describePrompt(d)) end
+        end
+    end
+
+    add("== BACKPACK ==")
+    local bp = lp:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do add(t.Name .. " | " .. t.ClassName .. " | " .. attrs(t)) end
+    end
+
+    add("== PROMPT TRONG 60 STUD ==")
+    local count = 0
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and root then
+            local pos = getPos(d.Parent)
+            if pos and (pos - root.Position).Magnitude <= 60 then
+                count += 1
+                if count <= 80 then add(describePrompt(d)) end
+            end
+        end
+    end
+
+    local text = table.concat(out, "\n")
+    local ok = copyText(text)
+    log(ok and ("Đã copy dump (" .. #out .. " dòng) vào clipboard") or "Không có clipboard, đã in ra console (F9)")
+end
+
+local rec = { on = false, lines = {} }
+
+local function recAdd(s)
+    if rec.on then
+        rec.lines[#rec.lines + 1] = os.date("%H:%M:%S ") .. s
+        log("REC: " .. s)
+    end
+end
+
+conns[#conns + 1] = ProximityPromptService.PromptTriggered:Connect(function(p, plr)
+    if plr == lp then recAdd("TRIGGER " .. describePrompt(p)) end
+end)
+
+local function watchBackpack(bp)
+    conns[#conns + 1] = bp.ChildAdded:Connect(function(t) recAdd("BACKPACK + " .. t.Name) end)
+    conns[#conns + 1] = bp.ChildRemoved:Connect(function(t) recAdd("BACKPACK - " .. t.Name) end)
+end
+local function watchChar(ch)
+    conns[#conns + 1] = ch.ChildAdded:Connect(function(t)
+        if t:IsA("Tool") then recAdd("EQUIP + " .. t.Name) end
+    end)
+    conns[#conns + 1] = ch.ChildRemoved:Connect(function(t)
+        if t:IsA("Tool") then recAdd("EQUIP - " .. t.Name) end
+    end)
+end
+do
+    local bp = lp:FindFirstChildOfClass("Backpack")
+    if bp then watchBackpack(bp) end
+    if lp.Character then watchChar(lp.Character) end
+    conns[#conns + 1] = lp.ChildAdded:Connect(function(c)
+        if c:IsA("Backpack") then watchBackpack(c) end
+    end)
+    conns[#conns + 1] = lp.CharacterAdded:Connect(watchChar)
+end
+
+----------------------------------------------------------------
 -- UI
 ----------------------------------------------------------------
-local gui = Instance.new("ScreenGui")
-gui.Name = "KietSlashHub"
-gui.ResetOnSpawn = false
-gui.Parent = playerGui
+local C = {
+    bg = Color3.fromRGB(16, 17, 24),
+    panel = Color3.fromRGB(27, 29, 40),
+    panel2 = Color3.fromRGB(38, 41, 56),
+    accent = Color3.fromRGB(0, 170, 255),
+    text = Color3.fromRGB(235, 238, 245),
+    sub = Color3.fromRGB(140, 148, 166),
+    off = Color3.fromRGB(70, 74, 92),
+    ok = Color3.fromRGB(60, 170, 110),
+    warn = Color3.fromRGB(210, 120, 50),
+    bad = Color3.fromRGB(200, 70, 80),
+}
 
-local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(290, 410)
-main.Position = UDim2.new(0, 10, 0.5, -205)
-main.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
-main.BorderSizePixel = 0
-main.Parent = gui
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
-local st = Instance.new("UIStroke", main)
-st.Color = Color3.fromRGB(0, 190, 255)
-st.Thickness = 1.5
+local function mk(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    o.Parent = parent
+    return o
+end
+local function corner(o, r)
+    return mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, o)
+end
 
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 34)
-title.BackgroundTransparency = 1
-title.Active = true
-title.Text = "Kiet Hub | Slash Pets"
-title.TextColor3 = Color3.fromRGB(0, 200, 255)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 15
-title.Parent = main
+local gui = mk("ScreenGui", { Name = "KietSlashHub", ResetOnSpawn = false }, playerGui)
 
-local function makeToggle(text, y, key, cb)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -20, 0, 32)
-    btn.Position = UDim2.new(0, 10, 0, y)
-    btn.TextColor3 = Color3.fromRGB(230, 230, 240)
-    btn.Font = Enum.Font.GothamMedium
-    btn.TextSize = 13
-    btn.Parent = main
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
-    local function paint()
-        btn.Text = text .. ": " .. (S[key] and "ON" or "OFF")
-        btn.BackgroundColor3 = S[key] and Color3.fromRGB(0, 150, 210) or Color3.fromRGB(30, 32, 42)
+local main = mk("Frame", {
+    Size = UDim2.fromOffset(310, 410),
+    Position = UDim2.new(0, 10, 0.5, -205),
+    BackgroundColor3 = C.bg,
+    BorderSizePixel = 0,
+}, gui)
+corner(main, 14)
+mk("UIStroke", { Color = C.accent, Thickness = 1.5, Transparency = 0.2 }, main)
+
+-- Header (kéo để di chuyển)
+local header = mk("Frame", {
+    Size = UDim2.new(1, 0, 0, 40),
+    BackgroundTransparency = 1,
+    Active = true,
+}, main)
+mk("TextLabel", {
+    Size = UDim2.new(1, -90, 0, 22),
+    Position = UDim2.fromOffset(14, 4),
+    BackgroundTransparency = 1,
+    Text = "Kiet Hub",
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextColor3 = C.accent,
+    Font = Enum.Font.GothamBold,
+    TextSize = 16,
+}, header)
+mk("TextLabel", {
+    Size = UDim2.new(1, -90, 0, 14),
+    Position = UDim2.fromOffset(14, 23),
+    BackgroundTransparency = 1,
+    Text = "Slash & Steal Pets",
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextColor3 = C.sub,
+    Font = Enum.Font.Gotham,
+    TextSize = 11,
+}, header)
+
+local btnMin = mk("TextButton", {
+    Size = UDim2.fromOffset(28, 28),
+    Position = UDim2.new(1, -70, 0, 6),
+    BackgroundColor3 = C.panel2,
+    Text = "–",
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 16,
+}, header)
+corner(btnMin, 8)
+local btnClose = mk("TextButton", {
+    Size = UDim2.fromOffset(28, 28),
+    Position = UDim2.new(1, -36, 0, 6),
+    BackgroundColor3 = C.bad,
+    Text = "×",
+    TextColor3 = Color3.new(1, 1, 1),
+    Font = Enum.Font.GothamBold,
+    TextSize = 16,
+}, header)
+corner(btnClose, 8)
+
+local body = mk("Frame", {
+    Position = UDim2.fromOffset(0, 40),
+    Size = UDim2.new(1, 0, 1, -40),
+    BackgroundTransparency = 1,
+}, main)
+
+-- Tabs
+local tabs, pagesByName = {}, {}
+local function selectTab(name)
+    for n, pg in pairs(pagesByName) do pg.Visible = (n == name) end
+    for n, b in pairs(tabs) do
+        b.BackgroundColor3 = (n == name) and C.accent or C.panel
+        b.TextColor3 = (n == name) and Color3.new(1, 1, 1) or C.sub
     end
-    paint()
-    btn.MouseButton1Click:Connect(function()
+end
+
+local tabBar = mk("Frame", {
+    Position = UDim2.fromOffset(10, 4),
+    Size = UDim2.new(1, -20, 0, 30),
+    BackgroundTransparency = 1,
+}, body)
+mk("UIListLayout", {
+    FillDirection = Enum.FillDirection.Horizontal,
+    Padding = UDim.new(0, 6),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+}, tabBar)
+
+for i, n in ipairs({ "Farm", "Setup", "Log" }) do
+    local b = mk("TextButton", {
+        Size = UDim2.new(1 / 3, -4, 1, 0),
+        BackgroundColor3 = C.panel,
+        Text = n,
+        TextColor3 = C.sub,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        LayoutOrder = i,
+    }, tabBar)
+    corner(b, 8)
+    b.MouseButton1Click:Connect(function() selectTab(n) end)
+    tabs[n] = b
+end
+
+local function listPage(name)
+    local pg = mk("ScrollingFrame", {
+        Position = UDim2.fromOffset(0, 38),
+        Size = UDim2.new(1, 0, 1, -38),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 3,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        Visible = false,
+    }, body)
+    mk("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, pg)
+    mk("UIPadding", {
+        PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 10),
+        PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
+    }, pg)
+    pagesByName[name] = pg
+    return pg
+end
+
+local function switchRow(parent, text, key, cb)
+    local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = C.panel }, parent)
+    corner(row, 10)
+    mk("TextLabel", {
+        Size = UDim2.new(1, -70, 1, 0),
+        Position = UDim2.fromOffset(12, 0),
+        BackgroundTransparency = 1,
+        Text = text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 14,
+    }, row)
+    local track = mk("TextButton", {
+        Size = UDim2.fromOffset(44, 24),
+        Position = UDim2.new(1, -56, 0.5, -12),
+        Text = "",
+        AutoButtonColor = false,
+        BackgroundColor3 = C.off,
+    }, row)
+    corner(track, 12)
+    local knob = mk("Frame", {
+        Size = UDim2.fromOffset(18, 18),
+        Position = UDim2.fromOffset(3, 3),
+        BackgroundColor3 = Color3.new(1, 1, 1),
+    }, track)
+    corner(knob, 9)
+    local function paint(animate)
+        local on = S[key]
+        local goal = on and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3)
+        if animate then
+            TweenService:Create(knob, TweenInfo.new(0.15), { Position = goal }):Play()
+        else
+            knob.Position = goal
+        end
+        TweenService:Create(track, TweenInfo.new(0.15), { BackgroundColor3 = on and C.accent or C.off }):Play()
+    end
+    paint(false)
+    track.MouseButton1Click:Connect(function()
         S[key] = not S[key]
-        paint()
+        paint(true)
         if cb then cb() end
     end)
 end
 
-local function makeButton(text, y, bg, fg, onClick)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -20, 0, 32)
-    btn.Position = UDim2.new(0, 10, 0, y)
-    btn.BackgroundColor3 = bg
-    btn.Text = text
-    btn.TextColor3 = fg
-    btn.Font = Enum.Font.GothamMedium
-    btn.TextSize = 12
-    btn.Parent = main
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
-    btn.MouseButton1Click:Connect(function()
-        local msg = onClick()
-        if msg then
-            btn.Text = msg
-            task.delay(1.2, function() btn.Text = text end)
-        end
+local function inputRow(parent, text, getter, setter)
+    local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = C.panel }, parent)
+    corner(row, 10)
+    mk("TextLabel", {
+        Size = UDim2.new(1, -110, 1, 0),
+        Position = UDim2.fromOffset(12, 0),
+        BackgroundTransparency = 1,
+        Text = text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+    }, row)
+    local box = mk("TextBox", {
+        Size = UDim2.fromOffset(84, 28),
+        Position = UDim2.new(1, -94, 0.5, -14),
+        BackgroundColor3 = C.panel2,
+        Text = tostring(getter()),
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+        ClearTextOnFocus = false,
+    }, row)
+    corner(box, 8)
+    box.FocusLost:Connect(function()
+        local v = tonumber(box.Text)
+        if v and v >= 0 then setter(v) end
+        box.Text = tostring(getter())
     end)
 end
 
-makeToggle("Auto Slash Egg", 42, "AutoSlash", refresh)
-makeToggle("Auto Steal Pet", 80, "AutoSteal", refresh)
-makeToggle("Bring Home", 118, "BringHome")
+local function actionButton(parent, text, color, onClick)
+    local b = mk("TextButton", {
+        Size = UDim2.new(1, 0, 0, 38),
+        BackgroundColor3 = color,
+        Text = text,
+        TextColor3 = Color3.new(1, 1, 1),
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+    }, parent)
+    corner(b, 10)
+    b.MouseButton1Click:Connect(function()
+        local msg = onClick(b)
+        if msg then
+            b.Text = msg
+            task.delay(1.4, function()
+                if b.Parent then b.Text = text end
+            end)
+        end
+    end)
+    return b
+end
 
-makeButton("Set Home (Đứng ở base)", 160, Color3.fromRGB(35, 55, 40), Color3.fromRGB(170, 255, 170), function()
-    local r = getRoot()
-    if r then savedHome = r.Position return "Home Saved!" end
+-- Trang Farm
+local farm = listPage("Farm")
+switchRow(farm, "Auto Slash Egg", "AutoSlash", refresh)
+switchRow(farm, "Auto Steal Pet", "AutoSteal", refresh)
+switchRow(farm, "Mang về & đặt vào base", "BringHome")
+
+local statusBox = mk("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.panel }, farm)
+corner(statusBox, 10)
+statusLabel = mk("TextLabel", {
+    Size = UDim2.new(1, -24, 0, 24),
+    Position = UDim2.fromOffset(12, 6),
+    BackgroundTransparency = 1,
+    Text = "Trạng thái: Idle",
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamMedium,
+    TextSize = 13,
+}, statusBox)
+statsLabel = mk("TextLabel", {
+    Size = UDim2.new(1, -24, 0, 20),
+    Position = UDim2.fromOffset(12, 30),
+    BackgroundTransparency = 1,
+    Text = "",
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextColor3 = C.sub,
+    Font = Enum.Font.Gotham,
+    TextSize = 12,
+}, statusBox)
+updateStats()
+
+mk("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 56),
+    BackgroundTransparency = 1,
+    Text = "1. Setup: Set Home ở base, Set Map Cuối\n2. Bật Auto Slash / Auto Steal\nChỉ lấy pet >= min income (tab Setup)",
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    TextColor3 = C.sub,
+    Font = Enum.Font.Gotham,
+    TextSize = 11,
+}, farm)
+
+-- Trang Setup
+local setup = listPage("Setup")
+inputRow(setup, "Min income (triệu/s)", function() return S.MinIncome / 1e6 end, function(v) S.MinIncome = v * 1e6 end)
+inputRow(setup, "Tốc độ bay", function() return S.Speed end, function(v)
+    S.Speed = math.clamp(v, 10, 150)
+    S.ReturnSpeed = math.max(S.Speed - 15, 10)
 end)
-
-makeButton("Set Map Cuối (Đứng map cuối)", 200, Color3.fromRGB(55, 40, 35), Color3.fromRGB(255, 200, 160), function()
+actionButton(setup, "Set Home (đứng ở base)", C.ok, function()
     local r = getRoot()
-    if r then savedEndMap = r.Position return "Map Cuối Saved!" end
+    if r then
+        savedHome = r.Position
+        log("Đã lưu Home")
+        return "Đã lưu Home ✓"
+    end
 end)
-
-local box = Instance.new("TextBox")
-box.Size = UDim2.new(1, -20, 0, 32)
-box.Position = UDim2.new(0, 10, 0, 240)
-box.BackgroundColor3 = Color3.fromRGB(30, 32, 42)
-box.Text = tostring(S.MinIncome / 1e6)
-box.PlaceholderText = "Min income (triệu/s)"
-box.TextColor3 = Color3.fromRGB(230, 230, 240)
-box.Font = Enum.Font.GothamMedium
-box.TextSize = 13
-box.ClearTextOnFocus = false
-box.Parent = main
-Instance.new("UICorner", box).CornerRadius = UDim.new(0, 7)
-box.FocusLost:Connect(function()
-    local v = tonumber(box.Text)
-    if v and v >= 0 then
-        S.MinIncome = v * 1e6
+actionButton(setup, "Set Map Cuối (đứng map cuối)", C.warn, function()
+    local r = getRoot()
+    if r then
+        savedEndMap = r.Position
+        log("Đã lưu Map Cuối")
+        return "Đã lưu Map Cuối ✓"
+    end
+end)
+actionButton(setup, "Dump Info (đứng ở base rồi bấm)", C.panel2, function()
+    dumpInfo()
+    return "Đã copy ✓"
+end)
+local recBtn
+recBtn = actionButton(setup, "● Ghi lại thao tác (bắt đầu)", C.bad, function()
+    if not rec.on then
+        rec.on = true
+        rec.lines = {}
+        recBtn.Text = "■ Đang ghi... bấm để dừng & copy"
+        log("Bắt đầu ghi. Hãy tự tay lấy pet và đặt về base.")
     else
-        box.Text = tostring(S.MinIncome / 1e6)
+        rec.on = false
+        local ok = copyText(table.concat(rec.lines, "\n"))
+        log(ok and ("Đã copy " .. #rec.lines .. " dòng ghi lại") or "Đã in ra console (F9)")
+        recBtn.Text = "● Ghi lại thao tác (bắt đầu)"
     end
 end)
 
-local info = Instance.new("TextLabel")
-info.Size = UDim2.new(1, -20, 0, 110)
-info.Position = UDim2.new(0, 10, 0, 282)
-info.BackgroundTransparency = 1
-info.Text = "Ô trên = min income (triệu/s)\n1. Set Home ở base\n2. Set Map Cuối\n3. Bật Auto Slash / Steal\nKéo thanh tiêu đề để di chuyển"
-info.TextColor3 = Color3.fromRGB(140, 150, 170)
-info.Font = Enum.Font.Gotham
-info.TextSize = 12
-info.TextWrapped = true
-info.TextYAlignment = Enum.TextYAlignment.Top
-info.Parent = main
-
-local icon = Instance.new("TextButton")
-icon.Size = UDim2.fromOffset(46, 46)
-icon.Position = UDim2.new(1, -58, 0, 70)
-icon.BackgroundColor3 = Color3.fromRGB(0, 170, 230)
-icon.Text = "K"
-icon.TextColor3 = Color3.new(1, 1, 1)
-icon.Font = Enum.Font.GothamBold
-icon.TextSize = 18
-icon.Parent = gui
-Instance.new("UICorner", icon).CornerRadius = UDim.new(1, 0)
-icon.MouseButton1Click:Connect(function()
-    main.Visible = not main.Visible
+-- Trang Log
+local logPage = mk("Frame", {
+    Position = UDim2.fromOffset(0, 38),
+    Size = UDim2.new(1, 0, 1, -38),
+    BackgroundTransparency = 1,
+    Visible = false,
+}, body)
+pagesByName["Log"] = logPage
+logScroll = mk("ScrollingFrame", {
+    Position = UDim2.fromOffset(10, 6),
+    Size = UDim2.new(1, -20, 1, -58),
+    BackgroundColor3 = C.panel,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, logPage)
+corner(logScroll, 10)
+mk("UIPadding", {
+    PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 8),
+    PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6),
+}, logScroll)
+logLabel = mk("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    Text = "",
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    TextColor3 = C.sub,
+    Font = Enum.Font.Code,
+    TextSize = 11,
+}, logScroll)
+local copyLog = mk("TextButton", {
+    Size = UDim2.new(1, -20, 0, 34),
+    Position = UDim2.new(0, 10, 1, -44),
+    BackgroundColor3 = C.panel2,
+    Text = "Copy log",
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+}, logPage)
+corner(copyLog, 10)
+copyLog.MouseButton1Click:Connect(function()
+    local ok = copyText(table.concat(logLines, "\n"))
+    copyLog.Text = ok and "Đã copy ✓" or "Đã in ra console"
+    task.delay(1.2, function()
+        if copyLog.Parent then copyLog.Text = "Copy log" end
+    end)
 end)
 
--- Kéo bằng thanh tiêu đề (không bị kéo khi bấm nút)
+selectTab("Farm")
+
+-- Thu nhỏ / đóng
+local minimized = false
+btnMin.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    body.Visible = not minimized
+    main.Size = minimized and UDim2.fromOffset(310, 40) or UDim2.fromOffset(310, 410)
+end)
+btnClose.MouseButton1Click:Connect(function()
+    S.AutoSlash, S.AutoSteal = false, false
+    alive = false
+    if curTween then curTween:Cancel() end
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    gui:Destroy()
+end)
+
+-- Kéo bằng header
 local drag, sPos, sInput
-title.InputBegan:Connect(function(i)
+header.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
         drag = true
         sPos = main.Position
         sInput = i.Position
     end
 end)
-title.InputEnded:Connect(function(i)
+header.InputEnded:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
         drag = false
     end
 end)
-UserInputService.InputChanged:Connect(function(i)
+conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
         local d = i.Position - sInput
         main.Position = UDim2.new(sPos.X.Scale, sPos.X.Offset + d.X, sPos.Y.Scale, sPos.Y.Offset + d.Y)
     end
 end)
 
-print("[Kiet Hub] v2 loaded")
+log("Kiet Hub v3 sẵn sàng")
+print("[Kiet Hub] v3 loaded")
