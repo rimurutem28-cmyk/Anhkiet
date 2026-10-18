@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub - Slash and Steal Pets (Fix Delay & Fix Base Event Spam)
+    Kiet Hub - Slash and Steal Pets (Auto-Fix Detection & Distance)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -14,12 +14,9 @@ repeat task.wait() until lp
 local S = {
     AutoSlash = false,
     AutoSteal = false,
-    MinIncome = 20000000,
-    SlashRange = 120,
-    StealRange = 100,
     BringHome = true,
-    Speed = 45,       -- Hạ tốc độ di chuyển để tránh bị rubberband (giật lùi)
-    ReturnSpeed = 35, -- Tốc độ về base an toàn
+    Speed = 50,
+    ReturnSpeed = 40,
 }
 
 local savedHome = nil
@@ -36,16 +33,15 @@ local function getRoot()
     return nil
 end
 
--- Tween mượt hơn, hạn chế bị giật lùi về vị trí cũ
 local function tweenTo(pos, speed)
     local root = getRoot()
     if not root or not pos then return end
     
     local dist = (root.Position - pos).Magnitude
-    if dist < 6 then return end
+    if dist < 4 then return end
     
     local spd = speed or S.Speed
-    local t = math.clamp(dist / spd, 0.3, 10)
+    local t = math.clamp(dist / spd, 0.2, 8)
     
     local tw = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
         CFrame = CFrame.new(pos + Vector3.new(0, 2.5, 0))
@@ -59,20 +55,87 @@ local function tweenTo(pos, speed)
         task.wait(0.05)
         elapsedTime = elapsedTime + 0.05
     end
-    
-    task.wait(0.15) -- Dừng nghỉ ngắn để Server cập nhật vị trí chính xác
 end
 
--- Chỉ Kích Hoạt Prompt Được Chỉ Định (Không bấm linh tinh ở Base)
-local function interactObject(obj)
+-- Kích hoạt ProximityPrompt trực tiếp
+local function triggerPrompt(obj)
     if not obj then return end
     pcall(function()
-        for _, v in ipairs(obj:GetDescendants()) do
-            if v:IsA("ProximityPrompt") then
-                fireproximityprompt(v)
+        if obj:IsA("ProximityPrompt") then
+            fireproximityprompt(obj)
+        else
+            for _, v in ipairs(obj:GetDescendants()) do
+                if v:IsA("ProximityPrompt") then
+                    fireproximityprompt(v)
+                end
             end
         end
     end)
+end
+
+-- TÌM PROXIMITY PROMPT / PET NÀO GẦN NHẤT CÓ THỂ CƯỚP
+local function findTargetPet()
+    local root = getRoot()
+    if not root then return nil, nil end
+    
+    local bestPrompt = nil
+    local bestObj = nil
+    local shortestDist = math.huge
+    
+    for _, prompt in ipairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local pName = prompt.ObjectText:lower() .. " " .. prompt.ActionText:lower()
+            local parent = prompt.Parent
+            local parentName = parent and parent.Name:lower() or ""
+            
+            -- Kiểm tra xem có liên quan tới Pet / Steal / Take không
+            if pName:find("steal") or pName:find("take") or pName:find("pet") or pName:find("grab") or parentName:find("pet") then
+                local pos = parent:IsA("BasePart") and parent.Position or (parent:IsA("Model") and parent:GetPivot().Position)
+                if pos then
+                    local dist = (root.Position - pos).Magnitude
+                    if dist < shortestDist then
+                        shortestDist = dist
+                        bestPrompt = prompt
+                        bestObj = parent
+                    end
+                end
+            end
+        end
+    end
+    
+    return bestObj, bestPrompt
+end
+
+-- TÌM TRỨNG / NÚT CHÉM TRỨNG
+local function findTargetEgg()
+    local root = getRoot()
+    if not root then return nil, nil end
+    
+    local bestPrompt = nil
+    local bestObj = nil
+    local shortestDist = math.huge
+    
+    for _, prompt in ipairs(workspace:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local pName = prompt.ObjectText:lower() .. " " .. prompt.ActionText:lower()
+            local parent = prompt.Parent
+            local parentName = parent and parent.Name:lower() or ""
+            
+            if pName:find("egg") or pName:find("slash") or pName:find("hatch") or pName:find("open") or parentName:find("egg") then
+                local pos = parent:IsA("BasePart") and parent.Position or (parent:IsA("Model") and parent:GetPivot().Position)
+                if pos then
+                    local dist = (root.Position - pos).Magnitude
+                    if dist < shortestDist then
+                        shortestDist = dist
+                        bestPrompt = prompt
+                        bestObj = parent
+                    end
+                end
+            end
+        end
+    end
+    
+    return bestObj, bestPrompt
 end
 
 local function setHomeHere()
@@ -91,120 +154,61 @@ local function getHome()
     return savedHome or (getRoot() and getRoot().Position)
 end
 
-local function parseIncome(t)
-    if not t then return 0 end
-    t = tostring(t):lower():gsub(",",""):gsub("%$",""):gsub("%s","")
-    local n, s = t:match("([%d%.]+)([kmb]?)")
-    if not n then return 0 end
-    n = tonumber(n) or 0
-    if s == "k" then return n*1e3 end
-    if s == "m" then return n*1e6 end
-    if s == "b" then return n*1e9 end
-    return n
-end
-
-local function getIncome(obj)
-    for _, a in ipairs({"Income","MoneyPerSecond","Value","MPS","Earnings","Gen","Money"}) do
-        local v = obj:GetAttribute(a)
-        if type(v) == "number" and v > 0 then return v end
-        if type(v) == "string" then
-            local n = parseIncome(v)
-            if n > 0 then return n end
-        end
-    end
-    return 0
-end
-
-local function findEgg()
-    local root = getRoot()
-    if not root then return nil end
-    local best, bestD = nil, S.SlashRange
-    for _, obj in ipairs(workspace:GetChildren()) do
-        if obj:IsA("Model") or obj:IsA("BasePart") then
-            local name = obj.Name:lower()
-            if name:find("egg") or obj:GetAttribute("Egg") or obj:HasTag("Egg") then
-                local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
-                local d = (root.Position - pos).Magnitude
-                if d < bestD then
-                    best, bestD = obj, d
-                end
-            end
-        end
-    end
-    return best
-end
-
-local function findPet()
-    local root = getRoot()
-    if not root then return nil end
-    local best, bestInc, bestD = nil, 0, S.StealRange
-    
-    -- Ưu tiên tìm trong Folder Pets nếu có, nếu không thì quét Workspace
-    local container = workspace:FindFirstChild("Pets") or workspace:FindFirstChild("DroppedPets") or workspace
-    
-    for _, obj in ipairs(container:GetChildren()) do
-        if obj:IsA("Model") or obj:IsA("BasePart") then
-            local inc = getIncome(obj)
-            local name = obj.Name:lower()
-            if (name:find("pet") or obj:GetAttribute("Pet") or obj:HasTag("Pet") or inc > 0) and inc >= S.MinIncome then
-                local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
-                local d = (root.Position - pos).Magnitude
-                if d < bestD or (inc > bestInc and d < S.StealRange) then
-                    best, bestInc, bestD = obj, inc, d
-                end
-            end
-        end
-    end
-    return best
-end
-
--- Vòng lặp chính xử lý mượt mà
+-- VÒNG LẶP XỬ LÝ CHÍNH
 task.spawn(function()
     while true do
-        task.wait(0.2)
+        task.wait(0.3)
         
-        -- 1. ƯU TIÊN BẮT PET (AUTO STEAL)
+        -- 1. TỰ ĐỘNG BẮT PET
         if S.AutoSteal and not isBusy then
-            local pet = findPet()
-            if pet then
+            local petObj, petPrompt = findTargetPet()
+            
+            if petObj and petPrompt then
                 isBusy = true
-                local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
+                local pos = petObj:IsA("Model") and petObj:GetPivot().Position or petObj.Position
                 
-                -- Di chuyển đến Pet
+                print("[Kiet Hub] Phát hiện Pet! Đang di chuyển tới...")
                 tweenTo(pos, S.Speed)
                 task.wait(0.2)
                 
-                -- Chỉ kích hoạt Prompt của PET ĐÓ (không bị click nhầm event ở base)
-                interactObject(pet)
-                task.wait(0.3)
+                -- Kích hoạt Prompt cướp Pet
+                fireproximityprompt(petPrompt)
+                triggerPrompt(petObj)
+                task.wait(0.4)
                 
-                -- Mang về Base nếu bật BringHome
+                -- Quay về Base
                 if S.BringHome then
                     local home = getHome()
                     if home then
+                        print("[Kiet Hub] Đã bắt Pet! Đang quay về Base...")
                         tweenTo(home, S.ReturnSpeed)
-                        task.wait(0.5) -- Nghỉ ở base để server chốt vị trí thành công
+                        task.wait(0.5)
                     end
                 end
                 isBusy = false
             end
         end
         
-        -- 2. TỰ ĐỘNG CHÉM TRỨNG (AUTO SLASH EGG)
+        -- 2. TỰ ĐỘNG CHÉM TRỨNG
         if S.AutoSlash and not isBusy then
             if savedEndMap then
                 local root = getRoot()
-                if root and (root.Position - savedEndMap).Magnitude > 25 then
+                if root and (root.Position - savedEndMap).Magnitude > 20 then
                     tweenTo(savedEndMap, S.Speed)
                     task.wait(0.2)
                 end
             end
             
-            local egg = findEgg()
-            if egg then
-                local pos = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
+            local eggObj, eggPrompt = findTargetEgg()
+            if eggObj then
+                local pos = eggObj:IsA("Model") and eggObj:GetPivot().Position or eggObj.Position
                 tweenTo(pos, S.Speed)
-                interactObject(egg)
+                
+                if eggPrompt then
+                    fireproximityprompt(eggPrompt)
+                else
+                    triggerPrompt(eggObj)
+                end
                 
                 local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
                 if tool then pcall(function() tool:Activate() end) end
@@ -213,9 +217,9 @@ task.spawn(function()
     end
 end)
 
--- UI Tương Tác
+-- GIAO DIỆN GUI
 local gui = Instance.new("ScreenGui")
-gui.Name = "KietSlashHub_Fixed"
+gui.Name = "KietSlashHub_V3"
 gui.ResetOnSpawn = false
 gui.Parent = lp:WaitForChild("PlayerGui")
 
@@ -234,7 +238,7 @@ st.Thickness = 1.5
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 34)
 title.BackgroundTransparency = 1
-title.Text = "Kiet Hub | Slash Pets (Fixed)"
+title.Text = "Kiet Hub | Slash Pets V3"
 title.TextColor3 = Color3.fromRGB(0, 200, 255)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 14
@@ -322,7 +326,7 @@ icon.MouseButton1Click:Connect(function()
     main.Visible = not main.Visible
 end)
 
--- Drag GUI
+-- Kéo thả UI
 local drag, sPos, sInput
 main.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
@@ -343,4 +347,4 @@ UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-print("[Kiet Hub] Fix Delay & Base Event Spam Success!")
+print("[Kiet Hub V3] Loaded Successfully!")
