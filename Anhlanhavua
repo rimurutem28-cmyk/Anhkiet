@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub v8 - Slash and Steal Pets (Take pet từ WorldPet)
+    Kiet Hub v10 - Slash and Steal Pets (Take pet từ WorldPet)
     - UI mới: 3 tab (Farm / Setup / Log), có log trạng thái
     - Steal: kiểm tra có nhận được pet (tool mới trong Backpack) hay chưa
     - Place: đặt pet về base (thử prompt có chữ place/đặt trong base của bạn)
@@ -28,6 +28,7 @@ local S = {
     BringHome = true,
     Path = "vertical", -- vertical = dọc (Z trước) | horizontal = ngang (X trước) | straight = thẳng
     MinIncome = 20e6,
+    MinEggHP = 0, -- chỉ chém egg có máu >= giá trị này (0 = chém hết)
     Speed = 55,
     ReturnSpeed = 40,
 }
@@ -105,12 +106,22 @@ local function tweenDirect(pos, speed)
     local dist = (root.Position - pos).Magnitude
     if dist < 8 then return end
     local t = math.max(dist / (speed or S.Speed), 0.15)
-    curTween = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
+    local tw = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
         CFrame = CFrame.new(pos + Vector3.new(0, 3, 0)),
     })
-    curTween:Play()
-    curTween.Completed:Wait()
-    curTween = nil
+    curTween = tw
+    local done = false
+    local c = tw.Completed:Connect(function() done = true end)
+    tw:Play()
+    local t0 = os.clock()
+    -- chờ xong, nhưng thoát nếu nhân vật bị thay (respawn/reset) hoặc quá giờ
+    while not done and alive and os.clock() - t0 < t + 1.5 do
+        if getRoot() ~= root then break end
+        task.wait(0.1)
+    end
+    c:Disconnect()
+    if not done then tw:Cancel() end
+    if curTween == tw then curTween = nil end
 end
 
 -- mode: "vertical" (dọc, Z trước rồi X) | "horizontal" (ngang, X trước rồi Z) | "straight"/nil (đi thẳng)
@@ -256,6 +267,19 @@ local function markLost(reason)
     end
 end
 
+local resetInfo = { at = 0 }
+
+-- Map reset / bị ép về điểm xuất phát: huỷ tween, bỏ pet đang mang, chờ tải lại rồi chạy lại từ đầu
+local function onMapReset(reason)
+    if os.clock() - resetInfo.at < 5 then return end
+    resetInfo.at = os.clock()
+    log("Map reset / bị đưa về điểm xuất phát: " .. tostring(reason))
+    setStatus("Map reset, chạy lại")
+    markLost("map reset")
+    if curTween then curTween:Cancel() end
+    for k in pairs(tried) do tried[k] = nil end
+end
+
 local function hookCharacter(char)
     local hum = char:WaitForChild("Humanoid", 5)
     if not hum then return end
@@ -272,7 +296,10 @@ local function hookCharacter(char)
     end)
 end
 if lp.Character then task.spawn(hookCharacter, lp.Character) end
-conns[#conns + 1] = lp.CharacterAdded:Connect(function(c) task.spawn(hookCharacter, c) end)
+conns[#conns + 1] = lp.CharacterAdded:Connect(function(c)
+    task.spawn(hookCharacter, c)
+    if S.AutoSlash or S.AutoSteal then onMapReset("nhân vật hồi sinh") end
+end)
 
 local function startCarry(uid)
     carry.active, carry.lost, carry.reason, carry.uid = true, false, nil, uid
@@ -297,6 +324,24 @@ end
 local function stopCarry()
     carry.active = false
 end
+
+-- Phát hiện bị teleport: vị trí nhảy > 120 stud trong 0.25s (tween của mình không bao giờ nhanh vậy)
+task.spawn(function()
+    local last
+    while alive do
+        local root = getRoot()
+        if root then
+            local pos = root.Position
+            if last and (S.AutoSlash or S.AutoSteal) and (pos - last).Magnitude > 120 then
+                onMapReset(("vị trí nhảy %d stud"):format((pos - last).Magnitude))
+            end
+            last = pos
+        else
+            last = nil
+        end
+        task.wait(0.25)
+    end
+end)
 
 ----------------------------------------------------------------
 -- Take pet: egg nở thành WorldPet, prompt "TakeEgg" (Take pet, giữ 1s)
@@ -495,18 +540,25 @@ end
 local function findEgg()
     local root = getRoot()
     if not root then return nil end
-    local best, bestD = nil, 150
+    local bestNear, bestNearD = nil, math.huge
+    local bestEnd, bestEndD = nil, math.huge
     for _, egg in ipairs(CollectionService:GetTagged("SAE_WorldEgg")) do
         local hp = egg:GetAttribute("SAE_EggHP")
         if type(hp) == "number" and hp > 0 and egg:IsDescendantOf(workspace) then
+            local maxhp = egg:GetAttribute("SAE_EggMaxHP")
+            local size = math.max(hp, type(maxhp) == "number" and maxhp or 0)
             local pos = getPos(egg)
-            if pos then
+            if pos and size >= S.MinEggHP then
                 local d = (root.Position - pos).Magnitude
-                if d < bestD then best, bestD = egg, d end
+                if d < bestNearD then bestNear, bestNearD = egg, d end
+                -- ưu tiên egg ở khu Map Cuối (bán kính 150 quanh điểm đã Set)
+                if savedEndMap and (pos - savedEndMap).Magnitude <= 150 and d < bestEndD then
+                    bestEnd, bestEndD = egg, d
+                end
             end
         end
     end
-    return best
+    return bestEnd or bestNear
 end
 
 local function slashOnce()
@@ -514,7 +566,7 @@ local function slashOnce()
     if not root then return end
     local egg = findEgg()
     if not egg then
-        setStatus("Chờ egg")
+        setStatus("Chờ egg" .. (S.MinEggHP > 0 and (" >= " .. fmtNum(S.MinEggHP) .. " máu") or ""))
         if savedEndMap and (root.Position - savedEndMap).Magnitude > 45 then
             tweenTo(savedEndMap, S.Speed)
         end
@@ -545,6 +597,10 @@ end
 -- Main loop
 ----------------------------------------------------------------
 local function step()
+    local since = os.clock() - resetInfo.at
+    if since < 3 then
+        task.wait(3 - since)
+    end
     if not getRoot() then return end
     if S.AutoSteal and stealOnce() then return end
     if S.AutoSlash then slashOnce() end
@@ -671,6 +727,9 @@ local function hookRemote(name)
         for i = 1, select("#", ...) do parts[#parts + 1] = argToText((select(i, ...))) end
         local msg = table.concat(parts, " | ")
         recAdd(name .. ": " .. msg)
+        if msg:lower():find("reset", 1, true) and (S.AutoSlash or S.AutoSteal) then
+            onMapReset(name .. ": " .. msg)
+        end
         if carry.active then
             log(name .. ": " .. msg)
             local low = msg:lower()
@@ -953,19 +1012,23 @@ local function actionButton(parent, text, color, onClick)
     return b
 end
 
+-- Nhập "20" (= 20 triệu), "500k", "1.5m", "1b" -> trả về số triệu
+local function parseM(t)
+    t = tostring(t):lower():gsub("[%s/s]", "")
+    if t:match("^[%d%.]+$") then return tonumber(t) end
+    local v = parseIncome(t)
+    return v > 0 and v / 1e6 or nil
+end
+
 -- Trang Farm
 local farm = listPage("Farm")
 switchRow(farm, "Auto Slash Egg", "AutoSlash", refresh)
 switchRow(farm, "Auto Steal (Take pet)", "AutoSteal", refresh)
 switchRow(farm, "Chạy về điểm nhận pet", "BringHome")
 inputRow(farm, "Chỉ lấy pet từ (M/s)", function() return S.MinIncome / 1e6 end,
-    function(v) S.MinIncome = v * 1e6 end,
-    function(t)
-        t = tostring(t):lower():gsub("[%s/s]", "")
-        if t:match("^[%d%.]+$") then return tonumber(t) end -- số thuần = triệu/s
-        local v = parseIncome(t)
-        return v > 0 and v / 1e6 or nil
-    end)
+    function(v) S.MinIncome = v * 1e6 end, parseM)
+inputRow(farm, "Chỉ chém egg từ (M máu)", function() return S.MinEggHP / 1e6 end,
+    function(v) S.MinEggHP = v * 1e6 end, parseM)
 
 local statusBox = mk("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.panel }, farm)
 corner(statusBox, 10)
@@ -992,9 +1055,9 @@ statsLabel = mk("TextLabel", {
 updateStats()
 
 mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 100),
+    Size = UDim2.new(1, 0, 0, 140),
     BackgroundTransparency = 1,
-    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chỉ chém egg\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nVào base: tự bấm Trang bị",
+    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg (ưu tiên khu Map Cuối nếu đã Set, chỉ egg đủ máu)\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nMap reset: tự phát hiện, chạy lại map cuối\nVào base: tự bấm Trang bị",
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top,
@@ -1140,5 +1203,5 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v8 sẵn sàng")
-print("[Kiet Hub] v8 loaded")
+log("Kiet Hub v10 sẵn sàng")
+print("[Kiet Hub] v10 loaded")
