@@ -1,130 +1,126 @@
 --[[
-    Kiet Hub V9 - Slash and Steal Pets (Instant Teleport Edition)
+    KIET HUB V10 - COMPLETE REWRITE EDITION
+    + Cyber Neon Interface
+    + Multi-Method Pet Stealer & Instant Return Base
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local lp = Players.LocalPlayer
+local LocalPlayer = Players.LocalPlayer
 
-repeat task.wait() until lp
+repeat task.wait() until LocalPlayer
 
-local S = {
+-- CẤU HÌNH HỆ THỐNG
+local Config = {
     AutoSlash = false,
     AutoSteal = false,
-    BringHome = true,
-    TeleportDelay = 0.05, -- Độ trễ giữa các bước dịch chuyển
+    AutoReturn = true,
+    TeleportSpeed = 0.04, -- Độ trễ giữa các bước TP (càng thấp càng nhanh)
 }
 
-local savedHome = nil
-local savedEndMap = nil
-local isReturning = false
-local noclipConnection = nil
+local SavedHome = nil
+local SavedEndMap = nil
+local IsProcessing = false
+local NoclipConnection = nil
 
-local function getRoot()
-    local char = lp.Character
+-- HÀM LẤY NHÂN VẬT AN TOÀN
+local function GetCharacter()
+    local char = LocalPlayer.Character
     if char then
         local hrp = char:FindFirstChild("HumanoidRootPart")
         local hum = char:FindFirstChildOfClass("Humanoid")
-        if hrp and hum and hum.Health > 0 then return hrp end
+        if hrp and hum and hum.Health > 0 then
+            return char, hrp, hum
+        end
     end
-    return nil
+    return nil, nil, nil
 end
 
--- Bật Noclip để tránh bị kẹt trong địa hình khi Teleport
-local function enableNoclip(state)
+-- BẬT/TẮT NOCLIP
+local function ToggleNoclip(state)
     if state then
-        if not noclipConnection then
-            noclipConnection = RunService.Stepped:Connect(function()
-                if lp.Character then
-                    for _, v in ipairs(lp.Character:GetDescendants()) do
-                        if v:IsA("BasePart") then
-                            v.CanCollide = false
+        if not NoclipConnection then
+            NoclipConnection = RunService.Stepped:Connect(function()
+                local char = GetCharacter()
+                if char then
+                    for _, part in ipairs(char:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            part.CanCollide = false
                         end
                     end
                 end
             end)
         end
     else
-        if noclipConnection then
-            noclipConnection:Disconnect()
-            noclipConnection = nil
+        if NoclipConnection then
+            NoclipConnection:Disconnect()
+            NoclipConnection = nil
         end
     end
 end
 
--- HÀM DỊCH CHUYỂN TỨC THỜI (BYPASS ANTI-CHEAT)
-local function teleportTo(targetPos)
-    local root = getRoot()
-    if not root or not targetPos then return end
+-- THUẬT TOÁN TELEPORT AN TOÀN (BYPASS ANTI-CHEAT)
+local function Teleport(targetPos)
+    local _, hrp = GetCharacter()
+    if not hrp or not targetPos then return end
+
+    ToggleNoclip(true)
     
-    enableNoclip(true)
-    
-    local startPos = root.Position
-    local dist = (startPos - targetPos).Magnitude
-    
-    -- Nếu khoảng cách gần, Teleport trực tiếp 1 lần
-    if dist < 50 then
-        root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+    local startPos = hrp.Position
+    local distance = (startPos - targetPos).Magnitude
+
+    if distance <= 40 then
+        hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 2.5, 0))
     else
-        -- Nếu khoảng cách xa, Teleport từng khoảng ngắn (Step TP) để Server nhận vị trí
-        local steps = math.floor(dist / 30)
+        local steps = math.clamp(math.floor(distance / 25), 2, 20)
         for i = 1, steps do
-            if not getRoot() then break end
+            local _, currentHrp = GetCharacter()
+            if not currentHrp then break end
+            
             local lerpPos = startPos:Lerp(targetPos, i / steps)
-            root.CFrame = CFrame.new(lerpPos + Vector3.new(0, 3, 0))
-            task.wait(S.TeleportDelay)
+            currentHrp.CFrame = CFrame.new(lerpPos + Vector3.new(0, 2.5, 0))
+            task.wait(Config.TeleportSpeed)
         end
-        root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+        hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 2.5, 0))
     end
-    
+
     task.wait(0.1)
-    enableNoclip(false)
+    ToggleNoclip(false)
 end
 
--- Ép buộc Dịch chuyển về Base ngay lập tức
-local function forceTeleportHome()
-    if not savedHome then
-        print("[Kiet Hub] Bạn chưa Set Home (Base)!")
-        return
-    end
-    if isReturning then return end
-    
-    isReturning = true
-    print("[Kiet Hub] Đang dịch chuyển về Base...")
-    teleportTo(savedHome)
-    task.wait(0.3)
-    isReturning = false
-end
-
-local function isCarryingPet()
-    local char = lp.Character
+-- KIỂM TRA XEM NHÂN VẬT CÓ MANG PET KHÔNG
+local function CheckCarryingPet()
+    local char = GetCharacter()
     if not char then return false end
-    
+
+    -- 1. Kiểm tra Tool trong người hoặc Backpack
+    if char:FindFirstChildOfClass("Tool") then return true end
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack and backpack:FindFirstChildOfClass("Tool") then return true end
+
+    -- 2. Kiểm tra các Model dính trên người
     for _, item in ipairs(char:GetChildren()) do
-        if item:IsA("Tool") then return true end
-    end
-    local backpack = lp:FindFirstChild("Backpack")
-    if backpack then
-        for _, item in ipairs(backpack:GetChildren()) do
-            if item:IsA("Tool") then return true end
+        if (item:IsA("Model") or item:IsA("BasePart")) and item.Name ~= "HumanoidRootPart" and item.Name ~= "Head" then
+            local n = item.Name:lower()
+            if n:find("pet") or item:GetAttribute("Pet") or item:GetAttribute("Carrying") then
+                return true
+            end
         end
     end
-    
-    for _, child in ipairs(char:GetChildren()) do
-        if child:IsA("Model") or (child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" and child.Name ~= "Head") then
-            return true
-        end
-    end
-    
+
     return false
 end
 
-local function interactPet(obj)
-    if not obj then return end
-    for _, prompt in ipairs(obj:GetDescendants()) do
+-- KÍCH HOẠT TƯƠNG TÁC TẤT CẢ PHƯƠNG THỨC
+local function TriggerInteraction(target)
+    if not target then return end
+
+    -- Cách 1: ProximityPrompt
+    for _, prompt in ipairs(target:GetDescendants()) do
         if prompt:IsA("ProximityPrompt") then
             pcall(function()
                 local oldHold = prompt.HoldDuration
@@ -134,249 +130,286 @@ local function interactPet(obj)
             end)
         end
     end
-    
-    local root = getRoot()
-    if root then
-        for _, part in ipairs(obj:GetDescendants()) do
+
+    -- Cách 2: TouchInterest (Va chạm Hitbox)
+    local _, hrp = GetCharacter()
+    if hrp then
+        for _, part in ipairs(target:GetDescendants()) do
             if part:IsA("BasePart") and part:FindFirstChildOfClass("TouchTransmitter") then
                 pcall(function()
-                    firetouchinterest(root, part, 0)
-                    task.wait(0.05)
-                    firetouchinterest(root, part, 1)
+                    firetouchinterest(hrp, part, 0)
+                    task.wait(0.02)
+                    firetouchinterest(hrp, part, 1)
                 end)
             end
         end
     end
+    
+    -- Cách 3: ClickDetector
+    for _, cd in ipairs(target:GetDescendants()) do
+        if cd:IsA("ClickDetector") then
+            pcall(function() fireclickdetector(cd) end)
+        end
+    end
 end
 
-local function findPetObject()
-    local root = getRoot()
-    if not root then return nil end
-    
-    local bestObj = nil
+-- TÌM PET GẦN NHẤT HOẶC TRÊN TOÀN BẢN ĐỒ
+local function FindPet()
+    local _, hrp = GetCharacter()
+    if not hrp then return nil end
+
+    local bestTarget = nil
     local shortestDist = math.huge
-    
+
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("Model") or obj:IsA("BasePart") then
             local name = obj.Name:lower()
-            local hasPrompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
-            local hasTouch = obj:FindFirstChildWhichIsA("TouchTransmitter", true) ~= nil
-            
-            if (name:find("pet") or obj:GetAttribute("Pet") or hasPrompt or hasTouch) and not obj:IsDescendantOf(lp.Character) then
+            local hasPrompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+            local hasTouch = obj:FindFirstChildWhichIsA("TouchTransmitter", true)
+
+            if (name:find("pet") or obj:GetAttribute("Pet") or hasPrompt or hasTouch) and not obj:IsDescendantOf(LocalPlayer.Character) then
                 local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
-                local dist = (root.Position - pos).Magnitude
+                local dist = (hrp.Position - pos).Magnitude
                 if dist < shortestDist then
                     shortestDist = dist
-                    bestObj = obj
+                    bestTarget = obj
                 end
             end
         end
     end
-    return bestObj
+
+    return bestTarget
 end
 
--- GIAO DIỆN V9
-local gui = Instance.new("ScreenGui")
-gui.Name = "KietHub_V9_Teleport"
-gui.ResetOnSpawn = false
-gui.Parent = lp:WaitForChild("PlayerGui")
+-- UI REDESIGN V10 (CYBER NEON)
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "KietHub_V10"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
-local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(300, 440)
-main.Position = UDim2.new(0.5, -150, 0.5, -220)
-main.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
-main.BorderSizePixel = 0
-main.Parent = gui
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 14)
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.fromOffset(280, 410)
+MainFrame.Position = UDim2.new(0.5, -140, 0.5, -205)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 17, 23)
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 16)
 
-local stroke = Instance.new("UIStroke", main)
-stroke.Color = Color3.fromRGB(0, 230, 255)
-stroke.Thickness = 2
+local MainStroke = Instance.new("UIStroke", MainFrame)
+MainStroke.Color = Color3.fromRGB(0, 240, 255)
+MainStroke.Thickness = 2
 
-local titleBg = Instance.new("Frame")
-titleBg.Size = UDim2.new(1, 0, 0, 42)
-titleBg.BackgroundColor3 = Color3.fromRGB(28, 31, 40)
-titleBg.BorderSizePixel = 0
-titleBg.Parent = main
-Instance.new("UICorner", titleBg).CornerRadius = UDim.new(0, 14)
+-- Header
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 45)
+Header.BackgroundColor3 = Color3.fromRGB(22, 25, 35)
+Header.BorderSizePixel = 0
+Header.Parent = MainFrame
+Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 16)
 
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -20, 1, 0)
-title.Position = UDim2.new(0, 12, 0, 0)
-title.BackgroundTransparency = 1
-title.Text = "⚡ KIET HUB  |  V9 TELEPORT"
-title.TextColor3 = Color3.fromRGB(0, 230, 255)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 13
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Parent = titleBg
+local HeaderTitle = Instance.new("TextLabel")
+HeaderTitle.Size = UDim2.new(1, -20, 1, 0)
+HeaderTitle.Position = UDim2.new(0, 15, 0, 0)
+HeaderTitle.BackgroundTransparency = 1
+HeaderTitle.Text = "❖ KIET HUB V10"
+HeaderTitle.TextColor3 = Color3.fromRGB(0, 240, 255)
+HeaderTitle.Font = Enum.Font.GothamBold
+HeaderTitle.TextSize = 14
+HeaderTitle.TextXAlignment = Enum.TextXAlignment.Left
+HeaderTitle.Parent = Header
 
-local function createToggle(text, y, key)
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(1, -24, 0, 36)
-    frame.Position = UDim2.new(0, 12, 0, y)
-    frame.BackgroundColor3 = Color3.fromRGB(28, 31, 40)
-    frame.Parent = main
-    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
-    
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(0.7, 0, 1, 0)
-    lbl.Position = UDim2.new(0, 12, 0, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = text
-    lbl.TextColor3 = Color3.fromRGB(230, 235, 245)
-    lbl.Font = Enum.Font.GothamMedium
-    lbl.TextSize = 12
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = frame
-    
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(0, 50, 0, 22)
-    btn.Position = UDim2.new(1, -60, 0.5, -11)
-    btn.BackgroundColor3 = Color3.fromRGB(45, 50, 65)
-    btn.Text = "OFF"
-    btn.TextColor3 = Color3.fromRGB(150, 160, 180)
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 10
-    btn.Parent = frame
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-    
-    btn.MouseButton1Click:Connect(function()
-        S[key] = not S[key]
-        if S[key] then
-            btn.Text = "ON"
-            btn.BackgroundColor3 = Color3.fromRGB(0, 200, 140)
-            btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+-- Tạo nút Toggle
+local function AddToggle(labelText, topY, configKey)
+    local Container = Instance.new("Frame")
+    Container.Size = UDim2.new(1, -24, 0, 38)
+    Container.Position = UDim2.new(0, 12, 0, topY)
+    Container.BackgroundColor3 = Color3.fromRGB(24, 28, 40)
+    Container.Parent = MainFrame
+    Instance.new("UICorner", Container).CornerRadius = UDim.new(0, 10)
+
+    local TextLabel = Instance.new("TextLabel")
+    TextLabel.Size = UDim2.new(0.65, 0, 1, 0)
+    TextLabel.Position = UDim2.new(0, 12, 0, 0)
+    TextLabel.BackgroundTransparency = 1
+    TextLabel.Text = labelText
+    TextLabel.TextColor3 = Color3.fromRGB(220, 225, 235)
+    TextLabel.Font = Enum.Font.GothamMedium
+    TextLabel.TextSize = 11
+    TextLabel.TextXAlignment = Enum.TextXAlignment.Left
+    TextLabel.Parent = Container
+
+    local ToggleBtn = Instance.new("TextButton")
+    ToggleBtn.Size = UDim2.new(0, 48, 0, 22)
+    ToggleBtn.Position = UDim2.new(1, -56, 0.5, -11)
+    ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 45, 60)
+    ToggleBtn.Text = "OFF"
+    ToggleBtn.TextColor3 = Color3.fromRGB(160, 170, 190)
+    ToggleBtn.Font = Enum.Font.GothamBold
+    ToggleBtn.TextSize = 10
+    ToggleBtn.Parent = Container
+    Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+
+    ToggleBtn.MouseButton1Click:Connect(function()
+        Config[configKey] = not Config[configKey]
+        if Config[configKey] then
+            ToggleBtn.Text = "ON"
+            ToggleBtn.BackgroundColor3 = Color3.fromRGB(0, 220, 130)
+            ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
         else
-            btn.Text = "OFF"
-            btn.BackgroundColor3 = Color3.fromRGB(45, 50, 65)
-            btn.TextColor3 = Color3.fromRGB(150, 160, 180)
+            ToggleBtn.Text = "OFF"
+            ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 45, 60)
+            ToggleBtn.TextColor3 = Color3.fromRGB(160, 170, 190)
         end
     end)
 end
 
-createToggle("Tự Động Chém Trứng", 55, "AutoSlash")
-createToggle("Tự Động Bắt Pet", 98, "AutoSteal")
-createToggle("Tự Mang Pet Về Base", 141, "BringHome")
+AddToggle("Tự Động Chém Trứng", 55, "AutoSlash")
+AddToggle("Tự Động Bắt Pet", 100, "AutoSteal")
+AddToggle("Tự Vác Pet Về Base", 145, "AutoReturn")
 
-local function createActionButton(text, y, color, cb)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -24, 0, 34)
-    btn.Position = UDim2.new(0, 12, 0, y)
-    btn.BackgroundColor3 = color
-    btn.Text = text
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 11
-    btn.Parent = main
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
-    btn.MouseButton1Click:Connect(cb)
-    return btn
+-- Tạo nút bấm Action
+local function AddActionButton(btnText, topY, btnColor, callback)
+    local ActionBtn = Instance.new("TextButton")
+    ActionBtn.Size = UDim2.new(1, -24, 0, 36)
+    ActionBtn.Position = UDim2.new(0, 12, 0, topY)
+    ActionBtn.BackgroundColor3 = btnColor
+    ActionBtn.Text = btnText
+    ActionBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    ActionBtn.Font = Enum.Font.GothamBold
+    ActionBtn.TextSize = 11
+    ActionBtn.Parent = MainFrame
+    Instance.new("UICorner", ActionBtn).CornerRadius = UDim.new(0, 10)
+
+    ActionBtn.MouseButton1Click:Connect(callback)
+    return ActionBtn
 end
 
-createActionButton("🏠 1. SET HOME (Đứng Base bấm)", 188, Color3.fromRGB(0, 120, 90), function()
-    local root = getRoot()
-    if root then savedHome = root.Position end
+AddActionButton("🏠 Set Vị Trí BASE", 195, Color3.fromRGB(0, 140, 100), function()
+    local _, hrp = GetCharacter()
+    if hrp then SavedHome = hrp.Position end
 end)
 
-createActionButton("🗺️ 2. SET MAP CUỐI (Đứng Map Cuối bấm)", 230, Color3.fromRGB(180, 90, 20), function()
-    local root = getRoot()
-    if root then savedEndMap = root.Position end
+AddActionButton("🗺️ Set Vị Trí MAP CUỐI", 238, Color3.fromRGB(200, 100, 20), function()
+    local _, hrp = GetCharacter()
+    if hrp then SavedEndMap = hrp.Position end
 end)
 
-createActionButton("⚡ TELEPORT VỀ BASE NGAY LẬP TỨC", 272, Color3.fromRGB(0, 130, 220), function()
-    forceTeleportHome()
-end)
-
-createActionButton("🔄 Reset Vị Trí Lưu", 314, Color3.fromRGB(140, 40, 40), function()
-    savedHome = nil
-    savedEndMap = nil
-end)
-
--- Icon Mở/Tắt
-local icon = Instance.new("TextButton")
-icon.Size = UDim2.fromOffset(48, 48)
-icon.Position = UDim2.new(1, -65, 0.15, 0)
-icon.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
-icon.Text = "⚡"
-icon.TextSize = 22
-icon.Parent = gui
-Instance.new("UICorner", icon).CornerRadius = UDim.new(1, 0)
-local iconStroke = Instance.new("UIStroke", icon)
-iconStroke.Color = Color3.fromRGB(0, 230, 255)
-iconStroke.Thickness = 2
-
-icon.MouseButton1Click:Connect(function()
-    main.Visible = not main.Visible
-end)
-
--- Kéo thả UI
-local drag, sPos, sInput
-main.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-        drag = true
-        sPos = main.Position
-        sInput = i.Position
-    end
-end)
-main.InputEnded:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-        drag = false
-    end
-end)
-UserInputService.InputChanged:Connect(function(i)
-    if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-        local d = i.Position - sInput
-        main.Position = UDim2.new(sPos.X.Scale, sPos.X.Offset + d.X, sPos.Y.Scale, sPos.Y.Offset + d.Y)
+AddActionButton("🚀 TELEPORT VỀ BASE NGAY", 281, Color3.fromRGB(0, 130, 230), function()
+    if SavedHome then
+        IsProcessing = true
+        Teleport(SavedHome)
+        task.wait(0.2)
+        IsProcessing = false
     end
 end)
 
--- VÒNG LẶP CHÍNH
+AddActionButton("🔄 Reset Vị Trí Saved", 324, Color3.fromRGB(160, 40, 40), function()
+    SavedHome = nil
+    SavedEndMap = nil
+end)
+
+-- Icon Mở/Thu nhỏ UI
+local ToggleIcon = Instance.new("TextButton")
+ToggleIcon.Size = UDim2.fromOffset(46, 46)
+ToggleIcon.Position = UDim2.new(1, -60, 0.15, 0)
+ToggleIcon.BackgroundColor3 = Color3.fromRGB(15, 17, 23)
+ToggleIcon.Text = "❖"
+ToggleIcon.TextColor3 = Color3.fromRGB(0, 240, 255)
+ToggleIcon.TextSize = 22
+ToggleIcon.Parent = ScreenGui
+Instance.new("UICorner", ToggleIcon).CornerRadius = UDim.new(1, 0)
+
+local IconStroke = Instance.new("UIStroke", ToggleIcon)
+IconStroke.Color = Color3.fromRGB(0, 240, 255)
+IconStroke.Thickness = 2
+
+ToggleIcon.MouseButton1Click:Connect(function()
+    MainFrame.Visible = not MainFrame.Visible
+end)
+
+-- Dragging GUI
+local isDragging, dragStart, startPos
+MainFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isDragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+    end
+end)
+MainFrame.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        isDragging = false
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- VÒNG LẶP XỬ LÝ CHÍNH
 task.spawn(function()
     while true do
-        task.wait(0.1)
-        
-        -- A. NẾU CÓ PET -> TELEPORT VỀ BASE NGAY
-        if S.BringHome and savedHome and isCarryingPet() and not isReturning then
-            isReturning = true
-            teleportTo(savedHome)
-            task.wait(0.8)
-            isReturning = false
+        task.wait(0.08)
+
+        -- 1. ƯU TIÊN HÀNG ĐẦU: ĐANG CẦM PET -> QUAY VỀ BASE LẬP TỨC
+        if Config.AutoReturn and SavedHome and CheckCarryingPet() and not IsProcessing then
+            IsProcessing = true
+            Teleport(SavedHome)
+            task.wait(0.6)
+            IsProcessing = false
         end
-        
-        -- B. AUTO STEAL PET -> TELEPORT ĐẾN PET
-        if S.AutoSteal and not isReturning and not isCarryingPet() then
-            local pet = findPetObject()
-            if pet then
-                local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
-                teleportTo(pos)
+
+        -- 2. AUTO STEAL PET
+        if Config.AutoSteal and not IsProcessing and not CheckCarryingPet() then
+            local targetPet = FindPet()
+            if targetPet then
+                IsProcessing = true
+                local targetPos = targetPet:IsA("Model") and targetPet:GetPivot().Position or targetPet.Position
+                
+                -- Teleport lại gần Pet
+                Teleport(targetPos)
                 task.wait(0.05)
-                interactPet(pet)
-                task.wait(0.3)
+                
+                -- Tương tác cướp
+                TriggerInteraction(targetPet)
+                task.wait(0.2)
+                
+                -- Tự động bay về Base nếu đã thiết lập
+                if Config.AutoReturn and SavedHome then
+                    Teleport(SavedHome)
+                    task.wait(0.5)
+                end
+                
+                IsProcessing = false
             end
         end
-        
-        -- C. AUTO SLASH -> TELEPORT ĐẾN MAP CUỐI
-        if S.AutoSlash and not isReturning and not isCarryingPet() then
-            if savedEndMap then
-                local root = getRoot()
-                if root and (root.Position - savedEndMap).Magnitude > 15 then
-                    teleportTo(savedEndMap)
+
+        -- 3. AUTO SLASH EGG
+        if Config.AutoSlash and not IsProcessing and not CheckCarryingPet() then
+            if SavedEndMap then
+                local _, hrp = GetCharacter()
+                if hrp and (hrp.Position - SavedEndMap).Magnitude > 12 then
+                    Teleport(SavedEndMap)
                 end
             end
-            
-            local char = lp.Character
-            local tool = char and char:FindFirstChildOfClass("Tool")
-            if not tool then
-                local backpack = lp:FindFirstChild("Backpack")
-                if backpack then
-                    tool = backpack:FindFirstChildOfClass("Tool")
-                    if tool then tool.Parent = char end
+
+            -- Trang bị kiếm/tool
+            local char = LocalPlayer.Character
+            if char then
+                local tool = char:FindFirstChildOfClass("Tool")
+                if not tool then
+                    local backpack = LocalPlayer:FindFirstChild("Backpack")
+                    if backpack then
+                        tool = backpack:FindFirstChildOfClass("Tool")
+                        if tool then tool.Parent = char end
+                    end
                 end
+                if tool then pcall(function() tool:Activate() end) end
             end
-            if tool then pcall(function() tool:Activate() end) end
         end
     end
 end)
 
-print("[Kiet Hub V9] Teleport Mode Ready!")
+print("[Kiet Hub V10] Loaded Successfully!")
