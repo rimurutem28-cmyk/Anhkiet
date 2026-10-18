@@ -1,11 +1,10 @@
 --[[
-    Kiet Hub V7 - Redesigned UI & Ultimate Pet Steal
+    Kiet Hub V9 - Slash and Steal Pets (Instant Teleport Edition)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
-local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local lp = Players.LocalPlayer
@@ -16,15 +15,13 @@ local S = {
     AutoSlash = false,
     AutoSteal = false,
     BringHome = true,
-    Speed = 34,
-    ReturnSpeed = 28,
+    TeleportDelay = 0.05, -- Độ trễ giữa các bước dịch chuyển
 }
 
 local savedHome = nil
 local savedEndMap = nil
 local isReturning = false
 local noclipConnection = nil
-local statusText = "Đang chờ bật tính năng..."
 
 local function getRoot()
     local char = lp.Character
@@ -36,6 +33,7 @@ local function getRoot()
     return nil
 end
 
+-- Bật Noclip để tránh bị kẹt trong địa hình khi Teleport
 local function enableNoclip(state)
     if state then
         if not noclipConnection then
@@ -57,32 +55,48 @@ local function enableNoclip(state)
     end
 end
 
-local function safeMoveTo(pos, speed)
+-- HÀM DỊCH CHUYỂN TỨC THỜI (BYPASS ANTI-CHEAT)
+local function teleportTo(targetPos)
     local root = getRoot()
-    if not root or not pos then return end
-    
-    local dist = (root.Position - pos).Magnitude
-    if dist < 4 then return end
+    if not root or not targetPos then return end
     
     enableNoclip(true)
-    local spd = speed or S.Speed
-    local t = dist / spd
     
-    local tw = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
-        CFrame = CFrame.new(pos + Vector3.new(0, 2.5, 0))
-    })
+    local startPos = root.Position
+    local dist = (startPos - targetPos).Magnitude
     
-    tw:Play()
-    
-    local elapsedTime = 0
-    while elapsedTime < t do
-        if not getRoot() then tw:Cancel() break end
-        task.wait(0.05)
-        elapsedTime = elapsedTime + 0.05
+    -- Nếu khoảng cách gần, Teleport trực tiếp 1 lần
+    if dist < 50 then
+        root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+    else
+        -- Nếu khoảng cách xa, Teleport từng khoảng ngắn (Step TP) để Server nhận vị trí
+        local steps = math.floor(dist / 30)
+        for i = 1, steps do
+            if not getRoot() then break end
+            local lerpPos = startPos:Lerp(targetPos, i / steps)
+            root.CFrame = CFrame.new(lerpPos + Vector3.new(0, 3, 0))
+            task.wait(S.TeleportDelay)
+        end
+        root.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
     end
     
+    task.wait(0.1)
     enableNoclip(false)
-    task.wait(0.15)
+end
+
+-- Ép buộc Dịch chuyển về Base ngay lập tức
+local function forceTeleportHome()
+    if not savedHome then
+        print("[Kiet Hub] Bạn chưa Set Home (Base)!")
+        return
+    end
+    if isReturning then return end
+    
+    isReturning = true
+    print("[Kiet Hub] Đang dịch chuyển về Base...")
+    teleportTo(savedHome)
+    task.wait(0.3)
+    isReturning = false
 end
 
 local function isCarryingPet()
@@ -90,22 +104,19 @@ local function isCarryingPet()
     if not char then return false end
     
     for _, item in ipairs(char:GetChildren()) do
-        if item:IsA("Tool") and (item.Name:lower():find("pet") or item.Name:lower():find("egg") or item:GetAttribute("Pet")) then
-            return true
+        if item:IsA("Tool") then return true end
+    end
+    local backpack = lp:FindFirstChild("Backpack")
+    if backpack then
+        for _, item in ipairs(backpack:GetChildren()) do
+            if item:IsA("Tool") then return true end
         end
     end
     
     for _, child in ipairs(char:GetChildren()) do
-        if child:IsA("Model") or child:IsA("BasePart") then
-            local n = child.Name:lower()
-            if n:find("pet") or child:GetAttribute("Carrying") or child:GetAttribute("Pet") then
-                return true
-            end
+        if child:IsA("Model") or (child:IsA("BasePart") and child.Name ~= "HumanoidRootPart" and child.Name ~= "Head") then
+            return true
         end
-    end
-    
-    if char:GetAttribute("Carrying") or char:GetAttribute("HasPet") or lp:GetAttribute("Carrying") then
-        return true
     end
     
     return false
@@ -113,7 +124,6 @@ end
 
 local function interactPet(obj)
     if not obj then return end
-    
     for _, prompt in ipairs(obj:GetDescendants()) do
         if prompt:IsA("ProximityPrompt") then
             pcall(function()
@@ -165,15 +175,15 @@ local function findPetObject()
     return bestObj
 end
 
--- GUI REDESIGN (NEON MODERN STYLE)
+-- GIAO DIỆN V9
 local gui = Instance.new("ScreenGui")
-gui.Name = "KietHub_V7_UI"
+gui.Name = "KietHub_V9_Teleport"
 gui.ResetOnSpawn = false
 gui.Parent = lp:WaitForChild("PlayerGui")
 
 local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(300, 420)
-main.Position = UDim2.new(0.5, -150, 0.5, -210)
+main.Size = UDim2.fromOffset(300, 440)
+main.Position = UDim2.new(0.5, -150, 0.5, -220)
 main.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
 main.BorderSizePixel = 0
 main.Parent = gui
@@ -182,9 +192,7 @@ Instance.new("UICorner", main).CornerRadius = UDim.new(0, 14)
 local stroke = Instance.new("UIStroke", main)
 stroke.Color = Color3.fromRGB(0, 230, 255)
 stroke.Thickness = 2
-stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 
--- Top Title Bar
 local titleBg = Instance.new("Frame")
 titleBg.Size = UDim2.new(1, 0, 0, 42)
 titleBg.BackgroundColor3 = Color3.fromRGB(28, 31, 40)
@@ -196,38 +204,13 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -20, 1, 0)
 title.Position = UDim2.new(0, 12, 0, 0)
 title.BackgroundTransparency = 1
-title.Text = "⚡ KIET HUB  |  V7 ULTIMATE"
+title.Text = "⚡ KIET HUB  |  V9 TELEPORT"
 title.TextColor3 = Color3.fromRGB(0, 230, 255)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = titleBg
 
--- Status Card
-local statusCard = Instance.new("Frame")
-statusCard.Size = UDim2.new(1, -24, 0, 36)
-statusCard.Position = UDim2.new(0, 12, 0, 50)
-statusCard.BackgroundColor3 = Color3.fromRGB(12, 14, 18)
-statusCard.BorderSizePixel = 0
-statusCard.Parent = main
-Instance.new("UICorner", statusCard).CornerRadius = UDim.new(0, 8)
-
-local statusLbl = Instance.new("TextLabel")
-statusLbl.Size = UDim2.new(1, -16, 1, 0)
-statusLbl.Position = UDim2.new(0, 8, 0, 0)
-statusLbl.BackgroundTransparency = 1
-statusLbl.Text = "📌 Trạng thái: Ready"
-statusLbl.TextColor3 = Color3.fromRGB(180, 200, 220)
-statusLbl.Font = Enum.Font.GothamMedium
-statusLbl.TextSize = 11
-statusLbl.TextXAlignment = Enum.TextXAlignment.Left
-statusLbl.Parent = statusCard
-
-local function updateStatus(txt)
-    statusLbl.Text = "📌 Trạng thái: " .. txt
-end
-
--- Helper tạo Toggle Button
 local function createToggle(text, y, key)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, -24, 0, 36)
@@ -272,14 +255,13 @@ local function createToggle(text, y, key)
     end)
 end
 
-createToggle("Tự Động Chém Trứng", 96, "AutoSlash")
-createToggle("Tự Động Bắt Pet", 138, "AutoSteal")
-createToggle("Tự Mang Pet Về Base", 180, "BringHome")
+createToggle("Tự Động Chém Trứng", 55, "AutoSlash")
+createToggle("Tự Động Bắt Pet", 98, "AutoSteal")
+createToggle("Tự Mang Pet Về Base", 141, "BringHome")
 
--- Helper tạo Action Button
 local function createActionButton(text, y, color, cb)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -24, 0, 36)
+    btn.Size = UDim2.new(1, -24, 0, 34)
     btn.Position = UDim2.new(0, 12, 0, y)
     btn.BackgroundColor3 = color
     btn.Text = text
@@ -288,34 +270,30 @@ local function createActionButton(text, y, color, cb)
     btn.TextSize = 11
     btn.Parent = main
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
-    
     btn.MouseButton1Click:Connect(cb)
     return btn
 end
 
-local btnSetHome = createActionButton("🏠 1. SET HOME (Đứng Base bấm)", 230, Color3.fromRGB(0, 120, 90), function()
+createActionButton("🏠 1. SET HOME (Đứng Base bấm)", 188, Color3.fromRGB(0, 120, 90), function()
     local root = getRoot()
-    if root then
-        savedHome = root.Position
-        updateStatus("Đã lưu vị trí BASE!")
-    end
+    if root then savedHome = root.Position end
 end)
 
-local btnSetEnd = createActionButton("🗺️ 2. SET MAP CUỐI (Đứng Map Cuối bấm)", 274, Color3.fromRGB(180, 90, 20), function()
+createActionButton("🗺️ 2. SET MAP CUỐI (Đứng Map Cuối bấm)", 230, Color3.fromRGB(180, 90, 20), function()
     local root = getRoot()
-    if root then
-        savedEndMap = root.Position
-        updateStatus("Đã lưu vị trí MAP CUỐI!")
-    end
+    if root then savedEndMap = root.Position end
 end)
 
-createActionButton("🔄 Reset Vị Trí Lưu", 318, Color3.fromRGB(140, 40, 40), function()
+createActionButton("⚡ TELEPORT VỀ BASE NGAY LẬP TỨC", 272, Color3.fromRGB(0, 130, 220), function()
+    forceTeleportHome()
+end)
+
+createActionButton("🔄 Reset Vị Trí Lưu", 314, Color3.fromRGB(140, 40, 40), function()
     savedHome = nil
     savedEndMap = nil
-    updateStatus("Đã xóa vị trí Base & Map cuối!")
 end)
 
--- Open/Close Floating Icon
+-- Icon Mở/Tắt
 local icon = Instance.new("TextButton")
 icon.Size = UDim2.fromOffset(48, 48)
 icon.Position = UDim2.new(1, -65, 0.15, 0)
@@ -324,7 +302,6 @@ icon.Text = "⚡"
 icon.TextSize = 22
 icon.Parent = gui
 Instance.new("UICorner", icon).CornerRadius = UDim.new(1, 0)
-
 local iconStroke = Instance.new("UIStroke", icon)
 iconStroke.Color = Color3.fromRGB(0, 230, 255)
 iconStroke.Thickness = 2
@@ -333,7 +310,7 @@ icon.MouseButton1Click:Connect(function()
     main.Visible = not main.Visible
 end)
 
--- Dragging Functionality
+-- Kéo thả UI
 local drag, sPos, sInput
 main.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
@@ -354,49 +331,40 @@ UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
--- MAIN LOOP LOGIC
+-- VÒNG LẶP CHÍNH
 task.spawn(function()
     while true do
         task.wait(0.1)
         
-        -- A. PHÁT HIỆN DANG CẦM PET -> QUAY VỀ BASE NGAY
+        -- A. NẾU CÓ PET -> TELEPORT VỀ BASE NGAY
         if S.BringHome and savedHome and isCarryingPet() and not isReturning then
             isReturning = true
-            updateStatus("Đã có Pet! Đang bay về Base...")
-            safeMoveTo(savedHome, S.ReturnSpeed)
+            teleportTo(savedHome)
             task.wait(0.8)
-            updateStatus("Đã về Base an toàn!")
             isReturning = false
         end
         
-        -- B. AUTO BẮT PET
+        -- B. AUTO STEAL PET -> TELEPORT ĐẾN PET
         if S.AutoSteal and not isReturning and not isCarryingPet() then
             local pet = findPetObject()
             if pet then
-                updateStatus("Phát hiện Pet! Đang di chuyển lại gần...")
                 local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
-                safeMoveTo(pos, S.Speed)
-                task.wait(0.1)
-                
-                updateStatus("Đang thực hiện cướp Pet...")
+                teleportTo(pos)
+                task.wait(0.05)
                 interactPet(pet)
                 task.wait(0.3)
-            else
-                updateStatus("Đang tìm Pet trên bản đồ...")
             end
         end
         
-        -- C. AUTO SLASH TRỨNG
+        -- C. AUTO SLASH -> TELEPORT ĐẾN MAP CUỐI
         if S.AutoSlash and not isReturning and not isCarryingPet() then
             if savedEndMap then
                 local root = getRoot()
                 if root and (root.Position - savedEndMap).Magnitude > 15 then
-                    updateStatus("Đang di chuyển tới Map Cuối...")
-                    safeMoveTo(savedEndMap, S.Speed)
+                    teleportTo(savedEndMap)
                 end
             end
             
-            updateStatus("Đang chém Trứng...")
             local char = lp.Character
             local tool = char and char:FindFirstChildOfClass("Tool")
             if not tool then
@@ -411,4 +379,4 @@ task.spawn(function()
     end
 end)
 
-print("[Kiet Hub V7 Redesign] Ready!")
+print("[Kiet Hub V9] Teleport Mode Ready!")
