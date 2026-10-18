@@ -1,7 +1,5 @@
 --[[
-    Kiet Hub - Slash and Steal Pets (Optimized & Fixed)
-    + Set Home + Set Map Cuối
-    + Chỉ về base khi bắt được pet
+    Kiet Hub - Slash and Steal Pets (Fix Delay & Fix Base Event Spam)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -9,25 +7,24 @@ if not game:IsLoaded() then game.Loaded:Wait() end
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-
 local lp = Players.LocalPlayer
+
 repeat task.wait() until lp
 
 local S = {
     AutoSlash = false,
     AutoSteal = false,
     MinIncome = 20000000,
-    SlashRange = 90,
-    StealRange = 60,
+    SlashRange = 120,
+    StealRange = 100,
     BringHome = true,
-    Speed = 60,
-    ReturnSpeed = 45,
+    Speed = 45,       -- Hạ tốc độ di chuyển để tránh bị rubberband (giật lùi)
+    ReturnSpeed = 35, -- Tốc độ về base an toàn
 }
 
 local savedHome = nil
 local savedEndMap = nil
-local isStealingOrReturning = false -- Tránh xung đột giữa Auto Slash và Auto Steal
+local isBusy = false
 
 local function getRoot()
     local char = lp.Character
@@ -39,44 +36,35 @@ local function getRoot()
     return nil
 end
 
--- Tối ưu Tween: Tắt CanCollide & Noclip tạm thời để không bị kẹt map
+-- Tween mượt hơn, hạn chế bị giật lùi về vị trí cũ
 local function tweenTo(pos, speed)
     local root = getRoot()
     if not root or not pos then return end
     
     local dist = (root.Position - pos).Magnitude
-    if dist < 5 then return end
+    if dist < 6 then return end
     
-    local t = math.clamp(dist / (speed or S.Speed), 0.2, 8)
-    local targetCFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    local spd = speed or S.Speed
+    local t = math.clamp(dist / spd, 0.3, 10)
     
     local tw = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
-        CFrame = targetCFrame
+        CFrame = CFrame.new(pos + Vector3.new(0, 2.5, 0))
     })
     
     tw:Play()
     
-    -- An toàn: Dùng task.wait() thay vì tw.Completed:Wait() để tránh kẹt vĩnh viễn
     local elapsedTime = 0
     while elapsedTime < t do
         if not getRoot() then tw:Cancel() break end
         task.wait(0.05)
         elapsedTime = elapsedTime + 0.05
     end
+    
+    task.wait(0.15) -- Dừng nghỉ ngắn để Server cập nhật vị trí chính xác
 end
 
-local function spamClick(n)
-    for i = 1, (n or 6) do
-        pcall(function()
-            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-            task.wait(0.02)
-            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-        end)
-        task.wait(0.03)
-    end
-end
-
-local function firePrompts(obj)
+-- Chỉ Kích Hoạt Prompt Được Chỉ Định (Không bấm linh tinh ở Base)
+local function interactObject(obj)
     if not obj then return end
     pcall(function()
         for _, v in ipairs(obj:GetDescendants()) do
@@ -124,12 +112,6 @@ local function getIncome(obj)
             if n > 0 then return n end
         end
     end
-    for _, d in ipairs(obj:GetChildren()) do -- Đổi thành GetChildren() để tránh đơ do quét sâu
-        if d:IsA("TextLabel") or d:IsA("TextButton") then
-            local n = parseIncome(d.Text)
-            if n >= 1000 then return n end
-        end
-    end
     return 0
 end
 
@@ -137,7 +119,7 @@ local function findEgg()
     local root = getRoot()
     if not root then return nil end
     local best, bestD = nil, S.SlashRange
-    for _, obj in ipairs(workspace:GetChildren()) do -- Tối ưu từ GetDescendants -> GetChildren nếu có thể
+    for _, obj in ipairs(workspace:GetChildren()) do
         if obj:IsA("Model") or obj:IsA("BasePart") then
             local name = obj.Name:lower()
             if name:find("egg") or obj:GetAttribute("Egg") or obj:HasTag("Egg") then
@@ -156,14 +138,18 @@ local function findPet()
     local root = getRoot()
     if not root then return nil end
     local best, bestInc, bestD = nil, 0, S.StealRange
-    for _, obj in ipairs(workspace:GetChildren()) do
+    
+    -- Ưu tiên tìm trong Folder Pets nếu có, nếu không thì quét Workspace
+    local container = workspace:FindFirstChild("Pets") or workspace:FindFirstChild("DroppedPets") or workspace
+    
+    for _, obj in ipairs(container:GetChildren()) do
         if obj:IsA("Model") or obj:IsA("BasePart") then
             local inc = getIncome(obj)
             local name = obj.Name:lower()
             if (name:find("pet") or obj:GetAttribute("Pet") or obj:HasTag("Pet") or inc > 0) and inc >= S.MinIncome then
                 local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
                 local d = (root.Position - pos).Magnitude
-                if d < bestD or (inc > bestInc and d < S.StealRange*1.5) then
+                if d < bestD or (inc > bestInc and d < S.StealRange) then
                     best, bestInc, bestD = obj, inc, d
                 end
             end
@@ -172,44 +158,45 @@ local function findPet()
     return best
 end
 
--- Vòng lặp chính xử lý riêng biệt không bị xung đột
+-- Vòng lặp chính xử lý mượt mà
 task.spawn(function()
     while true do
-        task.wait(0.1)
+        task.wait(0.2)
         
-        -- Auto Steal ưu tiên hàng đầu
-        if S.AutoSteal and not isStealingOrReturning then
+        -- 1. ƯU TIÊN BẮT PET (AUTO STEAL)
+        if S.AutoSteal and not isBusy then
             local pet = findPet()
             if pet then
-                isStealingOrReturning = true
+                isBusy = true
                 local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
                 
-                tweenTo(pos, S.Speed + 8)
-                task.wait(0.1)
+                -- Di chuyển đến Pet
+                tweenTo(pos, S.Speed)
+                task.wait(0.2)
                 
-                firePrompts(pet)
-                spamClick(6)
-                
-                -- Đợi 0.3s xem đã cướp pet thành công chưa rồi mới mang về
+                -- Chỉ kích hoạt Prompt của PET ĐÓ (không bị click nhầm event ở base)
+                interactObject(pet)
                 task.wait(0.3)
+                
+                -- Mang về Base nếu bật BringHome
                 if S.BringHome then
                     local home = getHome()
                     if home then
                         tweenTo(home, S.ReturnSpeed)
-                        task.wait(0.3)
-                        firePrompts(workspace)
+                        task.wait(0.5) -- Nghỉ ở base để server chốt vị trí thành công
                     end
                 end
-                isStealingOrReturning = false
+                isBusy = false
             end
         end
         
-        -- Auto Slash Egg chỉ chạy khi không bận cướp pet
-        if S.AutoSlash and not isStealingOrReturning then
+        -- 2. TỰ ĐỘNG CHÉM TRỨNG (AUTO SLASH EGG)
+        if S.AutoSlash and not isBusy then
             if savedEndMap then
                 local root = getRoot()
-                if root and (root.Position - savedEndMap).Magnitude > 30 then
+                if root and (root.Position - savedEndMap).Magnitude > 25 then
                     tweenTo(savedEndMap, S.Speed)
+                    task.wait(0.2)
                 end
             end
             
@@ -217,8 +204,7 @@ task.spawn(function()
             if egg then
                 local pos = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
                 tweenTo(pos, S.Speed)
-                spamClick(8)
-                firePrompts(egg)
+                interactObject(egg)
                 
                 local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
                 if tool then pcall(function() tool:Activate() end) end
@@ -227,9 +213,9 @@ task.spawn(function()
     end
 end)
 
--- Tạo GUI Interface
+-- UI Tương Tác
 local gui = Instance.new("ScreenGui")
-gui.Name = "KietSlashHub"
+gui.Name = "KietSlashHub_Fixed"
 gui.ResetOnSpawn = false
 gui.Parent = lp:WaitForChild("PlayerGui")
 
@@ -248,10 +234,10 @@ st.Thickness = 1.5
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 34)
 title.BackgroundTransparency = 1
-title.Text = "Kiet Hub | Slash Pets"
+title.Text = "Kiet Hub | Slash Pets (Fixed)"
 title.TextColor3 = Color3.fromRGB(0, 200, 255)
 title.Font = Enum.Font.GothamBold
-title.TextSize = 15
+title.TextSize = 14
 title.Parent = main
 
 local function makeToggle(text, y, key)
@@ -321,18 +307,6 @@ btnEnd.MouseButton1Click:Connect(function()
     end
 end)
 
-local info = Instance.new("TextLabel")
-info.Size = UDim2.new(1, -20, 0, 100)
-info.Position = UDim2.new(0, 10, 0, 245)
-info.BackgroundTransparency = 1
-info.Text = "1. Đứng base → Set Home\n2. Chạy lên map cuối → Set Map Cuối\n3. Bật Auto Slash + Auto Steal\nChỉ về base khi bắt được pet"
-info.TextColor3 = Color3.fromRGB(140, 150, 170)
-info.Font = Enum.Font.Gotham
-info.TextSize = 12
-info.TextWrapped = true
-info.TextYAlignment = Enum.TextYAlignment.Top
-info.Parent = main
-
 local icon = Instance.new("TextButton")
 icon.Size = UDim2.fromOffset(46, 46)
 icon.Position = UDim2.new(1, -58, 0, 70)
@@ -348,7 +322,7 @@ icon.MouseButton1Click:Connect(function()
     main.Visible = not main.Visible
 end)
 
--- Dragging GUI Smooth
+-- Drag GUI
 local drag, sPos, sInput
 main.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
@@ -369,4 +343,4 @@ UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-print("[Kiet Hub] Updated & Optimized Loaded Successfully!")
+print("[Kiet Hub] Fix Delay & Base Event Spam Success!")
