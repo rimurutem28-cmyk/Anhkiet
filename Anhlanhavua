@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub v5 - Slash and Steal Pets (Take pet từ WorldPet)
+    Kiet Hub v8 - Slash and Steal Pets (Take pet từ WorldPet)
     - UI mới: 3 tab (Farm / Setup / Log), có log trạng thái
     - Steal: kiểm tra có nhận được pet (tool mới trong Backpack) hay chưa
     - Place: đặt pet về base (thử prompt có chữ place/đặt trong base của bạn)
@@ -13,6 +13,8 @@ local CollectionService = game:GetService("CollectionService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
+local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local lp = Players.LocalPlayer
 local playerGui = lp:WaitForChild("PlayerGui")
@@ -24,7 +26,7 @@ local S = {
     AutoSlash = false,
     AutoSteal = false,
     BringHome = true,
-    AutoTake = true,
+    Path = "vertical", -- vertical = dọc (Z trước) | horizontal = ngang (X trước) | straight = thẳng
     MinIncome = 20e6,
     Speed = 55,
     ReturnSpeed = 40,
@@ -37,6 +39,7 @@ local curTween = nil
 local tried = {}
 local conns = {}
 local stats = { eggs = 0, pets = 0 }
+local carry = { active = false, lost = false, reason = nil, uid = nil }
 
 ----------------------------------------------------------------
 -- Log / status (UI gán sau)
@@ -96,7 +99,7 @@ local function getPos(inst)
     return nil
 end
 
-local function tweenTo(pos, speed)
+local function tweenDirect(pos, speed)
     local root = getRoot()
     if not root or not pos or not alive then return end
     local dist = (root.Position - pos).Magnitude
@@ -108,6 +111,26 @@ local function tweenTo(pos, speed)
     curTween:Play()
     curTween.Completed:Wait()
     curTween = nil
+end
+
+-- mode: "vertical" (dọc, Z trước rồi X) | "horizontal" (ngang, X trước rồi Z) | "straight"/nil (đi thẳng)
+local function tweenTo(pos, speed, mode)
+    local root = getRoot()
+    if not root or not pos or not alive then return end
+    if mode == "vertical" or mode == "horizontal" then
+        local cur = root.Position
+        local wp
+        if mode == "vertical" then
+            wp = Vector3.new(cur.X, pos.Y, pos.Z)
+        else
+            wp = Vector3.new(pos.X, pos.Y, cur.Z)
+        end
+        if (wp - cur).Magnitude > 8 and (wp - pos).Magnitude > 8 then
+            tweenDirect(wp, speed)
+            if not alive or (carry.active and carry.lost) then return end
+        end
+    end
+    tweenDirect(pos, speed)
 end
 
 local MULT = { k = 1e3, m = 1e6, b = 1e9, t = 1e12 }
@@ -220,6 +243,62 @@ local function waitNewTool(before, timeout)
 end
 
 ----------------------------------------------------------------
+-- Phát hiện bị boss đánh / mất pet khi đang mang về
+----------------------------------------------------------------
+local LOST_WORDS = { "stolen", "stole", "lost", "taken back", "took your", "knocked", "returned", "bị", "mất", "lấy lại" }
+
+local function markLost(reason)
+    if carry.active and not carry.lost then
+        carry.lost = true
+        carry.reason = reason
+        log("Phát hiện bị đánh / mất pet: " .. tostring(reason))
+        if curTween then curTween:Cancel() end
+    end
+end
+
+local function hookCharacter(char)
+    local hum = char:WaitForChild("Humanoid", 5)
+    if not hum then return end
+    local last = hum.Health
+    conns[#conns + 1] = hum.HealthChanged:Connect(function(h)
+        if h < last - 0.5 then markLost(("mất máu %.0f"):format(last - h)) end
+        last = h
+    end)
+    conns[#conns + 1] = hum.StateChanged:Connect(function(_, new)
+        if new == Enum.HumanoidStateType.Ragdoll or new == Enum.HumanoidStateType.FallingDown
+            or new == Enum.HumanoidStateType.PlatformStanding or new == Enum.HumanoidStateType.Dead then
+            markLost("trạng thái " .. tostring(new))
+        end
+    end)
+end
+if lp.Character then task.spawn(hookCharacter, lp.Character) end
+conns[#conns + 1] = lp.CharacterAdded:Connect(function(c) task.spawn(hookCharacter, c) end)
+
+local function startCarry(uid)
+    carry.active, carry.lost, carry.reason, carry.uid = true, false, nil, uid
+    task.spawn(function()
+        while carry.active and alive do
+            if carry.uid then
+                -- egg của pet này quay lại map (boss lấy lại trứng)
+                for _, m in ipairs(CollectionService:GetTagged("SAE_WorldEgg")) do
+                    if m:GetAttribute("SAE_EggUid") == carry.uid
+                        and m:GetAttribute("SAE_HatchState") ~= "hatched"
+                        and (m:GetAttribute("SAE_EggHP") or 0) > 0 then
+                        markLost("egg quay lại map")
+                        break
+                    end
+                end
+            end
+            task.wait(0.2)
+        end
+    end)
+end
+
+local function stopCarry()
+    carry.active = false
+end
+
+----------------------------------------------------------------
 -- Take pet: egg nở thành WorldPet, prompt "TakeEgg" (Take pet, giữ 1s)
 ----------------------------------------------------------------
 local function nowServer()
@@ -255,8 +334,11 @@ end
 local function worldPetIncome(m)
     local inc = petIncome(m)
     if inc > 0 then return inc end
-    local v = m:GetAttribute("SAE_HatchIncome")
-    return type(v) == "number" and v or 0
+    for _, k in ipairs({ "SAE_HatchIncome", "Income" }) do
+        local v = m:GetAttribute(k)
+        if type(v) == "number" and v > 0 then return v end
+    end
+    return 0
 end
 
 local function pickNearest(list, maxD)
@@ -276,6 +358,7 @@ end
 local function takePet(item)
     local pet, prompt = item.pet, item.prompt
     local name = tostring(pet:GetAttribute("DisplayName") or pet.Name)
+    item.uid = pet:GetAttribute("SAE_EggUid")
     setStatus("Đang lấy " .. name)
     tweenTo(getPos(pet), S.Speed + 5)
 
@@ -321,56 +404,65 @@ local function takePet(item)
 end
 
 -- Lấy pet xong: chạy về điểm nhận (Home), pet sẽ tự vào túi. Vào base thì tự bấm Trang bị.
-local function afterTake(ok, tool, before)
+-- Nếu bị boss đánh giữa đường thì bỏ chạy về, quay lại chém tiếp.
+local function afterTake(ok, tool, before, uid)
     if not ok or not S.BringHome then return end
+    startCarry(uid)
     local home = savedHome or startPos
     if home then
         setStatus("Chạy về điểm nhận pet")
-        tweenTo(home, S.ReturnSpeed)
+        tweenTo(home, S.ReturnSpeed, S.Path)
     end
-    setStatus("Chờ pet vào túi")
-    local got = tool or newTool(before) or waitNewTool(before, 8)
+    local got = tool or newTool(before)
+    if not got and not carry.lost then
+        setStatus("Chờ pet vào túi")
+        local t0 = os.clock()
+        repeat
+            got = newTool(before)
+            if got or carry.lost then break end
+            task.wait(0.2)
+        until os.clock() - t0 > 8
+    end
+    local lost, reason = carry.lost, carry.reason
+    stopCarry()
     if got then
         log("Pet đã vào túi: " .. got.Name)
+    elseif lost then
+        stats.pets = math.max(stats.pets - 1, 0)
+        updateStats()
+        setStatus("Bị boss, quay lại chém")
+        log("Pet bị lấy lại (" .. tostring(reason) .. "), quay lại chém egg")
     else
         log("Đã về điểm nhưng chưa thấy pet vào túi. Kiểm tra lại Set Home (phải đúng điểm nhận pet).")
     end
 end
 
--- Sau khi chém egg: chờ nở rồi nhặt pet của mình
-local function collectOwnHatch()
-    local t0 = os.clock()
-    local item
-    repeat
-        item = pickNearest(findTakeable(true, false), 150)
-        if item then break end
-        task.wait(0.3)
-    until os.clock() - t0 > 9
-    if not item then
-        log("Không thấy pet vừa nở để nhặt")
-        return
-    end
-    local ok, tool, before = takePet(item)
-    afterTake(ok, tool, before)
-end
+-- Auto Steal = Take pet: nhặt pet vừa nở (của mình hoặc người khác) có income >= min
+local skipped = {}
 
--- Steal: nhặt pet người khác vừa nở (>= min income)
 local function stealOnce()
     local now = os.clock()
     local best, bestInc = nil, 0
-    for _, it in ipairs(findTakeable(false, true)) do
+    for _, it in ipairs(findTakeable(false, false)) do
         if not (tried[it.prompt] and now - tried[it.prompt] < 8) then
             local inc = worldPetIncome(it.pet)
-            if inc >= S.MinIncome and inc > bestInc then best, bestInc = it, inc end
+            if inc >= S.MinIncome then
+                if inc > bestInc then best, bestInc = it, inc end
+            elseif not skipped[it.pet] then
+                skipped[it.pet] = true
+                log(("Bỏ qua %s (%s/s < min %s/s)"):format(
+                    tostring(it.pet:GetAttribute("DisplayName") or it.pet.Name),
+                    fmtNum(inc), fmtNum(S.MinIncome)))
+            end
         end
     end
     if not best then return false end
     tried[best.prompt] = now
-    log(("Steal: %s (%s/s) chủ %s"):format(
+    log(("Take pet: %s (%s/s)%s"):format(
         tostring(best.pet:GetAttribute("DisplayName") or best.pet.Name),
-        fmtNum(bestInc), tostring(best.pet:GetAttribute("SAE_HatchBy"))))
+        fmtNum(bestInc), best.mine and " [của mình]" or ""))
     local ok, tool, before = takePet(best)
-    afterTake(ok, tool, before)
+    afterTake(ok, tool, before, best.uid)
     return true
 end
 
@@ -446,7 +538,6 @@ local function slashOnce()
     if not egg:IsDescendantOf(workspace) or (egg:GetAttribute("SAE_EggHP") or 0) <= 0 then
         stats.eggs += 1
         updateStats()
-        if S.AutoTake and S.AutoSlash then collectOwnHatch() end
     end
 end
 
@@ -562,6 +653,38 @@ end
 conns[#conns + 1] = ProximityPromptService.PromptTriggered:Connect(function(p, plr)
     if plr == lp then recAdd("TRIGGER " .. describePrompt(p)) end
 end)
+
+local function argToText(v)
+    if type(v) == "table" then
+        local ok, j = pcall(HttpService.JSONEncode, HttpService, v)
+        return ok and j or "{table}"
+    end
+    return tostring(v)
+end
+
+local function hookRemote(name)
+    local folder = ReplicatedStorage:FindFirstChild("Remotes")
+    local r = folder and folder:FindFirstChild(name)
+    if not (r and r:IsA("RemoteEvent")) then return end
+    conns[#conns + 1] = r.OnClientEvent:Connect(function(...)
+        local parts = {}
+        for i = 1, select("#", ...) do parts[#parts + 1] = argToText((select(i, ...))) end
+        local msg = table.concat(parts, " | ")
+        recAdd(name .. ": " .. msg)
+        if carry.active then
+            log(name .. ": " .. msg)
+            local low = msg:lower()
+            for _, k in ipairs(LOST_WORDS) do
+                if low:find(k, 1, true) then
+                    markLost(name .. ": " .. msg)
+                    break
+                end
+            end
+        end
+    end)
+end
+hookRemote("Notify")
+hookRemote("Announce")
 
 local function watchBackpack(bp)
     conns[#conns + 1] = bp.ChildAdded:Connect(function(t) recAdd("BACKPACK + " .. t.Name) end)
@@ -777,7 +900,7 @@ local function switchRow(parent, text, key, cb)
     end)
 end
 
-local function inputRow(parent, text, getter, setter)
+local function inputRow(parent, text, getter, setter, parse)
     local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = C.panel }, parent)
     corner(row, 10)
     mk("TextLabel", {
@@ -802,7 +925,7 @@ local function inputRow(parent, text, getter, setter)
     }, row)
     corner(box, 8)
     box.FocusLost:Connect(function()
-        local v = tonumber(box.Text)
+        local v = (parse or tonumber)(box.Text)
         if v and v >= 0 then setter(v) end
         box.Text = tostring(getter())
     end)
@@ -833,9 +956,16 @@ end
 -- Trang Farm
 local farm = listPage("Farm")
 switchRow(farm, "Auto Slash Egg", "AutoSlash", refresh)
-switchRow(farm, "Auto Steal (pet người khác)", "AutoSteal", refresh)
-switchRow(farm, "Tự nhặt pet sau khi nở", "AutoTake")
+switchRow(farm, "Auto Steal (Take pet)", "AutoSteal", refresh)
 switchRow(farm, "Chạy về điểm nhận pet", "BringHome")
+inputRow(farm, "Chỉ lấy pet từ (M/s)", function() return S.MinIncome / 1e6 end,
+    function(v) S.MinIncome = v * 1e6 end,
+    function(t)
+        t = tostring(t):lower():gsub("[%s/s]", "")
+        if t:match("^[%d%.]+$") then return tonumber(t) end -- số thuần = triệu/s
+        local v = parseIncome(t)
+        return v > 0 and v / 1e6 or nil
+    end)
 
 local statusBox = mk("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.panel }, farm)
 corner(statusBox, 10)
@@ -862,9 +992,9 @@ statsLabel = mk("TextLabel", {
 updateStats()
 
 mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 56),
+    Size = UDim2.new(1, 0, 0, 100),
     BackgroundTransparency = 1,
-    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg rồi tự nhặt pet\n3. Auto Steal: nhặt pet người khác vừa nở (>= min income)\nVào base: tự bấm Trang bị",
+    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chỉ chém egg\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nVào base: tự bấm Trang bị",
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top,
@@ -875,7 +1005,6 @@ mk("TextLabel", {
 
 -- Trang Setup
 local setup = listPage("Setup")
-inputRow(setup, "Min income (triệu/s)", function() return S.MinIncome / 1e6 end, function(v) S.MinIncome = v * 1e6 end)
 inputRow(setup, "Tốc độ bay", function() return S.Speed end, function(v)
     S.Speed = math.clamp(v, 10, 150)
     S.ReturnSpeed = math.max(S.Speed - 15, 10)
@@ -895,6 +1024,12 @@ actionButton(setup, "Set Map Cuối (đứng map cuối)", C.warn, function()
         log("Đã lưu Map Cuối")
         return "Đã lưu Map Cuối ✓"
     end
+end)
+local PATH_LABEL = { vertical = "Dọc (Z trước)", horizontal = "Ngang (X trước)", straight = "Thẳng" }
+local PATH_NEXT = { vertical = "horizontal", horizontal = "straight", straight = "vertical" }
+actionButton(setup, "Hướng chạy về: " .. PATH_LABEL[S.Path], C.panel2, function(b)
+    S.Path = PATH_NEXT[S.Path]
+    b.Text = "Hướng chạy về: " .. PATH_LABEL[S.Path]
 end)
 actionButton(setup, "Dump Info (đứng ở base rồi bấm)", C.panel2, function()
     dumpInfo()
@@ -1005,5 +1140,5 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v5 sẵn sàng")
-print("[Kiet Hub] v5 loaded")
+log("Kiet Hub v8 sẵn sàng")
+print("[Kiet Hub] v8 loaded")
