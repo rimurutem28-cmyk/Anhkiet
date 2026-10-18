@@ -1,709 +1,153 @@
-
-
 --[[
-
-    KIET HUB V12 - CYBER NEON
-
-    Single-file UI + position manager
-
-    Features:
-
-    - Cyber Neon UI
-
-    - Draggable window (mouse + touch)
-
-    - Minimize / restore
-
-    - Auto Slash toggle
-
-    - Auto Steal status toggle
-
-    - Auto Return toggle
-
-    - Set Base / Set Map
-
-    - Manual teleport to saved positions
-
-    - Reset saved positions
-
-    - Respawn-safe character lookup
-
-    - Status display
-
+    Kiet Hub - Game Info Dumper
+    Dùng để lấy thông tin chính xác của Slash and Steal Pets
+    Chạy script này → copy toàn bộ output trong Console/F9 gửi lại
 ]]
 
-if not game:IsLoaded() then
-
-    game.Loaded:Wait()
-
-end
+if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
-
-local UserInputService = game:GetService("UserInputService")
-
-local Player = Players.LocalPlayer
-
-local PlayerGui = Player:WaitForChild("PlayerGui")
-
--- Remove old instance
-
-local oldGui = PlayerGui:FindFirstChild("KietHub_V12")
-
-if oldGui then
-
-    oldGui:Destroy()
-
-end
-
-local Config = {
-
-    AutoSlash = false,
-
-    AutoSteal = false,
-
-    AutoReturn = true,
-
-}
-
-local State = {
-
-    SavedHome = nil,
-
-    SavedMap = nil,
-
-    Busy = false,
-
-    Status = "Ready",
-
-}
-
-local Colors = {
-
-    Background = Color3.fromRGB(15, 17, 23),
-
-    Header = Color3.fromRGB(22, 25, 35),
-
-    Panel = Color3.fromRGB(24, 28, 40),
-
-    Cyan = Color3.fromRGB(0, 240, 255),
-
-    Green = Color3.fromRGB(0, 220, 130),
-
-    Blue = Color3.fromRGB(0, 130, 230),
-
-    Orange = Color3.fromRGB(200, 100, 20),
-
-    Red = Color3.fromRGB(170, 45, 55),
-
-    White = Color3.fromRGB(235, 240, 250),
-
-    Muted = Color3.fromRGB(150, 165, 185),
-
-}
-
-local function GetCharacter()
-
-    local character = Player.Character
-
-    if not character then
-
-        return nil, nil, nil
-
-    end
-
-    local root = character:FindFirstChild("HumanoidRootPart")
-
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-
-    if not root or not humanoid or humanoid.Health <= 0 then
-
-        return nil, nil, nil
-
-    end
-
-    return character, root, humanoid
-
-end
-
-local function SetStatus(message)
-
-    State.Status = message
-
-end
-
-local function SavePosition(which)
-
-    local _, root = GetCharacter()
-
-    if not root then
-
-        SetStatus("Character unavailable")
-
-        return false
-
-    end
-
-    if which == "Home" then
-
-        State.SavedHome = root.CFrame
-
-        SetStatus("Base position saved")
-
-    elseif which == "Map" then
-
-        State.SavedMap = root.CFrame
-
-        SetStatus("Map position saved")
-
-    end
-
-    return true
-
-end
-
--- Client-side position request; the server may reject it.
-
-local function TeleportToSaved(which)
-
-    if State.Busy then
-
-        SetStatus("Another action is running")
-
-        return
-
-    end
-
-    local destination
-
-    if which == "Home" then
-
-        destination = State.SavedHome
-
-    elseif which == "Map" then
-
-        destination = State.SavedMap
-
-    end
-
-    if typeof(destination) ~= "CFrame" then
-
-        SetStatus("Save this position first")
-
-        return
-
-    end
-
-    local _, root = GetCharacter()
-
-    if not root then
-
-        SetStatus("Character unavailable")
-
-        return
-
-    end
-
-    State.Busy = true
-
-    local success, err = pcall(function()
-
-        local _, currentRoot = GetCharacter()
-
-        if not currentRoot then
-
-            error("Character changed")
-
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CollectionService = game:GetService("CollectionService")
+
+local lp = Players.LocalPlayer
+repeat task.wait() until lp
+
+print("========== KIET GAME INFO DUMPER ==========")
+print("Game:", game.PlaceId, game.Name)
+print("Player:", lp.Name, lp.UserId)
+print("")
+
+-- 1. Remotes
+print("----- REMOTES / BINDABLE -----")
+local function scanRemotes(parent, path)
+    path = path or parent.Name
+    for _, obj in ipairs(parent:GetChildren()) do
+        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("UnreliableRemoteEvent") then
+            print(obj.ClassName .. " | " .. path .. "/" .. obj.Name)
         end
-
-        currentRoot.CFrame =
-
-            destination + Vector3.new(0, 3, 0)
-
-    end)
-
-    State.Busy = false
-
-    if success then
-
-        SetStatus("Movement requested")
-
-    else
-
-        SetStatus("Movement failed")
-
-        warn("[KietHub] Teleport error:", err)
-
-    end
-
-end
-
--- GUI
-
-local Gui = Instance.new("ScreenGui")
-
-Gui.Name = "KietHub_V12"
-
-Gui.ResetOnSpawn = false
-
-Gui.DisplayOrder = 999
-
-Gui.Parent = PlayerGui
-
-local Main = Instance.new("Frame")
-
-Main.Name = "Main"
-
-Main.Size = UDim2.fromOffset(290, 440)
-
-Main.Position = UDim2.new(0.5, -145, 0.5, -220)
-
-Main.BackgroundColor3 = Colors.Background
-
-Main.BorderSizePixel = 0
-
-Main.Parent = Gui
-
-Instance.new("UICorner", Main).CornerRadius =
-
-    UDim.new(0, 15)
-
-local Stroke = Instance.new("UIStroke")
-
-Stroke.Color = Colors.Cyan
-
-Stroke.Thickness = 2
-
-Stroke.Parent = Main
-
-local Header = Instance.new("Frame")
-
-Header.Size = UDim2.new(1, 0, 0, 46)
-
-Header.BackgroundColor3 = Colors.Header
-
-Header.BorderSizePixel = 0
-
-Header.Parent = Main
-
-Instance.new("UICorner", Header).CornerRadius =
-
-    UDim.new(0, 15)
-
-local Title = Instance.new("TextLabel")
-
-Title.Size = UDim2.new(1, -55, 1, 0)
-
-Title.Position = UDim2.fromOffset(13, 0)
-
-Title.BackgroundTransparency = 1
-
-Title.Text = "❖ KIET HUB V12"
-
-Title.TextColor3 = Colors.Cyan
-
-Title.Font = Enum.Font.GothamBold
-
-Title.TextSize = 14
-
-Title.TextXAlignment = Enum.TextXAlignment.Left
-
-Title.Parent = Header
-
-local Minimize = Instance.new("TextButton")
-
-Minimize.Size = UDim2.fromOffset(30, 28)
-
-Minimize.Position = UDim2.new(1, -38, 0, 9)
-
-Minimize.BackgroundColor3 = Colors.Panel
-
-Minimize.Text = "—"
-
-Minimize.TextColor3 = Colors.White
-
-Minimize.Font = Enum.Font.GothamBold
-
-Minimize.TextSize = 16
-
-Minimize.Parent = Header
-
-Instance.new("UICorner", Minimize).CornerRadius =
-
-    UDim.new(0, 7)
-
-local Body = Instance.new("Frame")
-
-Body.Position = UDim2.fromOffset(0, 51)
-
-Body.Size = UDim2.new(1, 0, 1, -55)
-
-Body.BackgroundTransparency = 1
-
-Body.Parent = Main
-
-local StatusLabel = Instance.new("TextLabel")
-
-StatusLabel.Position = UDim2.fromOffset(14, 0)
-
-StatusLabel.Size = UDim2.new(1, -28, 0, 28)
-
-StatusLabel.BackgroundTransparency = 1
-
-StatusLabel.Text = "STATUS: Ready"
-
-StatusLabel.TextColor3 = Colors.Muted
-
-StatusLabel.Font = Enum.Font.Gotham
-
-StatusLabel.TextSize = 10
-
-StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-StatusLabel.TextTruncate = Enum.TextTruncate.AtEnd
-
-StatusLabel.Parent = Body
-
-local function MakeButton(text, y, color, callback)
-
-    local button = Instance.new("TextButton")
-
-    button.Size = UDim2.new(1, -24, 0, 35)
-
-    button.Position = UDim2.fromOffset(12, y)
-
-    button.BackgroundColor3 = color
-
-    button.BorderSizePixel = 0
-
-    button.Text = text
-
-    button.TextColor3 = Colors.White
-
-    button.Font = Enum.Font.GothamBold
-
-    button.TextSize = 11
-
-    button.AutoButtonColor = true
-
-    button.Parent = Body
-
-    Instance.new("UICorner", button).CornerRadius =
-
-        UDim.new(0, 9)
-
-    button.Activated:Connect(function()
-
-        local success, err = pcall(callback)
-
-        if not success then
-
-            SetStatus("Action failed")
-
-            warn("[KietHub] Button error:", err)
-
+        if #obj:GetChildren() > 0 and not obj:IsA("Player") then
+            scanRemotes(obj, path .. "/" .. obj.Name)
         end
-
-    end)
-
-    return button
-
-end
-
-local function MakeToggle(label, y, key)
-
-    local button = MakeButton("", y, Colors.Panel, function()
-
-        Config[key] = not Config[key]
-
-        SetStatus(label .. ": " ..
-
-            (Config[key] and "ON" or "OFF"))
-
-    end)
-
-    local labelText = Instance.new("TextLabel")
-
-    labelText.Size = UDim2.new(1, -65, 1, 0)
-
-    labelText.Position = UDim2.fromOffset(12, 0)
-
-    labelText.BackgroundTransparency = 1
-
-    labelText.Text = label
-
-    labelText.TextColor3 = Colors.White
-
-    labelText.Font = Enum.Font.GothamMedium
-
-    labelText.TextSize = 11
-
-    labelText.TextXAlignment = Enum.TextXAlignment.Left
-
-    labelText.Parent = button
-
-    local stateText = Instance.new("TextLabel")
-
-    stateText.Size = UDim2.fromOffset(43, 25)
-
-    stateText.Position = UDim2.new(1, -51, 0.5, -12)
-
-    stateText.BackgroundColor3 = Config[key]
-
-        and Colors.Green or Colors.Red
-
-    stateText.Text = Config[key] and "ON" or "OFF"
-
-    stateText.TextColor3 = Colors.White
-
-    stateText.Font = Enum.Font.GothamBold
-
-    stateText.TextSize = 10
-
-    stateText.Parent = button
-
-    Instance.new("UICorner", stateText).CornerRadius =
-
-        UDim.new(0, 6)
-
-    button.Activated:Connect(function()
-
-        stateText.Text = Config[key] and "ON" or "OFF"
-
-        stateText.BackgroundColor3 = Config[key]
-
-            and Colors.Green or Colors.Red
-
-    end)
-
-    return button
-
-end
-
-MakeToggle("Auto Slash Egg", 34, "AutoSlash")
-
-MakeToggle("Auto Steal Pet", 75, "AutoSteal")
-
-MakeToggle("Auto Return Base", 116, "AutoReturn")
-
-MakeButton("SET BASE POSITION", 159, Colors.Green, function()
-
-    SavePosition("Home")
-
-end)
-
-MakeButton("SET MAP POSITION", 200, Colors.Orange, function()
-
-    SavePosition("Map")
-
-end)
-
-MakeButton("TELEPORT TO BASE", 241, Colors.Blue, function()
-
-    TeleportToSaved("Home")
-
-end)
-
-MakeButton("TELEPORT TO MAP", 282, Colors.Blue, function()
-
-    TeleportToSaved("Map")
-
-end)
-
-MakeButton("RESET SAVED POSITIONS", 323, Colors.Red, function()
-
-    State.SavedHome = nil
-
-    State.SavedMap = nil
-
-    SetStatus("Saved positions cleared")
-
-end)
-
-local Note = Instance.new("TextLabel")
-
-Note.Position = UDim2.fromOffset(14, 365)
-
-Note.Size = UDim2.new(1, -28, 0, 27)
-
-Note.BackgroundTransparency = 1
-
-Note.Text = "Pet success requires real confirmation"
-
-Note.TextColor3 = Colors.Muted
-
-Note.Font = Enum.Font.Gotham
-
-Note.TextSize = 9
-
-Note.TextWrapped = true
-
-Note.Parent = Body
-
--- Status refresh
-
-task.spawn(function()
-
-    while Gui.Parent do
-
-        StatusLabel.Text = "STATUS: " .. State.Status
-
-        task.wait(0.2)
-
     end
+end
 
+print("[ReplicatedStorage]")
+scanRemotes(ReplicatedStorage)
+
+if game:GetService("ReplicatedFirst") then
+    print("\n[ReplicatedFirst]")
+    pcall(function() scanRemotes(game:GetService("ReplicatedFirst")) end)
+end
+
+-- 2. CollectionService Tags
+print("\n----- COLLECTION SERVICE TAGS -----")
+pcall(function()
+    local tags = {}
+    for _, inst in ipairs(workspace:GetDescendants()) do
+        for _, tag in ipairs(CollectionService:GetTags(inst)) do
+            tags[tag] = (tags[tag] or 0) + 1
+        end
+    end
+    for tag, count in pairs(tags) do
+        print("Tag:", tag, "| Count:", count)
+    end
 end)
 
--- Minimize / restore
+-- 3. Workspace structure (top level)
+print("\n----- WORKSPACE TOP LEVEL -----")
+for _, obj in ipairs(workspace:GetChildren()) do
+    print(obj.ClassName, "|", obj.Name)
+end
 
-local Icon = Instance.new("TextButton")
+-- 4. Find Eggs
+print("\n----- EGGS (sample) -----")
+local eggCount = 0
+for _, obj in ipairs(workspace:GetDescendants()) do
+    local name = obj.Name:lower()
+    if (name:find("egg") or obj:GetAttribute("Egg") or obj:HasTag("Egg")) and eggCount < 8 then
+        eggCount += 1
+        print("Egg:", obj:GetFullName())
+        print("  Class:", obj.ClassName)
+        for attr, val in pairs(obj:GetAttributes()) do
+            print("  Attr:", attr, "=", val)
+        end
+        for _, c in ipairs(obj:GetChildren()) do
+            if c:IsA("ProximityPrompt") or c:IsA("ClickDetector") or c:IsA("BasePart") then
+                print("  Child:", c.ClassName, c.Name)
+            end
+        end
+    end
+end
+print("Total eggs found (sample max 8):", eggCount)
 
-Icon.Name = "RestoreButton"
+-- 5. Find Pets
+print("\n----- PETS (sample) -----")
+local petCount = 0
+for _, obj in ipairs(workspace:GetDescendants()) do
+    local name = obj.Name:lower()
+    if (name:find("pet") or obj:GetAttribute("Pet") or obj:HasTag("Pet")) and petCount < 8 then
+        petCount += 1
+        print("Pet:", obj:GetFullName())
+        print("  Class:", obj.ClassName)
+        for attr, val in pairs(obj:GetAttributes()) do
+            print("  Attr:", attr, "=", val)
+        end
+        -- Billboards
+        for _, d in ipairs(obj:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text ~= "" then
+                print("  Text:", d.Text)
+            end
+        end
+    end
+end
+print("Total pets found (sample max 8):", petCount)
 
-Icon.Size = UDim2.fromOffset(46, 46)
+-- 6. Player character tools
+print("\n----- CHARACTER / TOOLS -----")
+local char = lp.Character
+if char then
+    for _, v in ipairs(char:GetChildren()) do
+        print(v.ClassName, v.Name)
+    end
+    local backpack = lp:FindFirstChild("Backpack")
+    if backpack then
+        print("[Backpack]")
+        for _, v in ipairs(backpack:GetChildren()) do
+            print(" ", v.ClassName, v.Name)
+        end
+    end
+end
 
-Icon.Position = UDim2.new(1, -60, 0.15, 0)
-
-Icon.BackgroundColor3 = Colors.Background
-
-Icon.Text = "❖"
-
-Icon.TextColor3 = Colors.Cyan
-
-Icon.TextSize = 22
-
-Icon.Font = Enum.Font.GothamBold
-
-Icon.Visible = false
-
-Icon.Parent = Gui
-
-Instance.new("UICorner", Icon).CornerRadius =
-
-    UDim.new(1, 0)
-
-local IconStroke = Instance.new("UIStroke")
-
-IconStroke.Color = Colors.Cyan
-
-IconStroke.Thickness = 2
-
-IconStroke.Parent = Icon
-
-Minimize.Activated:Connect(function()
-
-    Main.Visible = false
-
-    Icon.Visible = true
-
-end)
-
-Icon.Activated:Connect(function()
-
-    Main.Visible = true
-
-    Icon.Visible = false
-
-end)
-
--- Drag support for mouse and touch
-
-local function MakeDraggable(handle, target)
-
-    local dragging = false
-
-    local dragInput = nil
-
-    local dragStart = nil
-
-    local startPosition = nil
-
-    handle.InputBegan:Connect(function(input)
-
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-
-            or input.UserInputType == Enum.UserInputType.Touch then
-
-            dragging = true
-
-            dragStart = input.Position
-
-            startPosition = target.Position
-
-            input.Changed:Connect(function()
-
-                if input.UserInputState ==
-
-                    Enum.UserInputState.End then
-
-                    dragging = false
-
+-- 7. Possible base/plot
+print("\n----- POSSIBLE BASES / PLOTS -----")
+for _, name in ipairs({"Plots", "Bases", "PlayerPlots", "Farms", "Homes", "Tycoons", "PlayerBases", "Plot"}) do
+    local f = workspace:FindFirstChild(name)
+    if f then
+        print("Found folder:", name)
+        for i, p in ipairs(f:GetChildren()) do
+            if i <= 5 then
+                print("  ", p.Name, p.ClassName)
+                for attr, val in pairs(p:GetAttributes()) do
+                    print("    Attr:", attr, "=", val)
                 end
-
-            end)
-
+            end
         end
-
-    end)
-
-    handle.InputChanged:Connect(function(input)
-
-        if input.UserInputType == Enum.UserInputType.MouseMovement
-
-            or input.UserInputType == Enum.UserInputType.Touch then
-
-            dragInput = input
-
-        end
-
-    end)
-
-    UserInputService.InputChanged:Connect(function(input)
-
-        if dragging and input == dragInput then
-
-            local delta = input.Position - dragStart
-
-            target.Position = UDim2.new(
-
-                startPosition.X.Scale,
-
-                startPosition.X.Offset + delta.X,
-
-                startPosition.Y.Scale,
-
-                startPosition.Y.Offset + delta.Y
-
-            )
-
-        end
-
-    end)
-
+    end
 end
 
-MakeDraggable(Header, Main)
-
-MakeDraggable(Icon, Icon)
-
--- Track respawns without holding stale character references
-
-local CharacterConnection
-
-CharacterConnection = Player.CharacterAdded:Connect(function()
-
-    SetStatus("Character respawned")
-
-end)
-
-Gui.Destroying:Connect(function()
-
-    if CharacterConnection then
-
-        CharacterConnection:Disconnect()
-
+-- 8. Shared / Controllers
+print("\n----- getrenv().shared / Controllers -----")
+pcall(function()
+    local shared = getrenv().shared
+    if shared then
+        for k, v in pairs(shared) do
+            print("shared." .. tostring(k), type(v))
+        end
+    else
+        print("No getrenv().shared")
     end
-
 end)
 
-print("[KietHub V12] UI initialized")
+print("\n========== END DUMP ==========")
+print("Copy toàn bộ dòng trên (từ KIET GAME INFO đến END DUMP) gửi lại cho mình")
