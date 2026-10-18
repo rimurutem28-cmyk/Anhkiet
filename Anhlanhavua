@@ -1,194 +1,341 @@
 --[[
-    Kiet Hub - Game Info Dumper (Mobile Friendly)
-    Hiện hộp chữ để copy dễ trên điện thoại
+    Kiet Hub - Slash and Steal Pets
+    Bản dựa trên dump (SAE_WorldEgg, SAE_Plot)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local lp = Players.LocalPlayer
 repeat task.wait() until lp
 
-local lines = {}
-local function log(str)
-    str = tostring(str)
-    table.insert(lines, str)
-    print(str)
+local S = {
+    AutoSlash = false,
+    AutoSteal = false,
+    MinIncome = 20000000,
+    BringHome = true,
+    Speed = 55,
+    ReturnSpeed = 40,
+}
+
+local savedHome = nil
+local savedEndMap = nil
+
+local function getRoot()
+    local char = lp.Character
+    if char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hrp and hum and hum.Health > 0 then return hrp end
+    end
+    return nil
 end
 
-log("========== KIET GAME INFO DUMPER ==========")
-log("Game: " .. tostring(game.PlaceId) .. " | " .. tostring(game.Name))
-log("Player: " .. lp.Name .. " | " .. tostring(lp.UserId))
-log("")
-
-log("----- REMOTES -----")
-local function scanRemotes(parent, path)
-    path = path or parent.Name
-    for _, obj in ipairs(parent:GetChildren()) do
-        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("UnreliableRemoteEvent") then
-            log(obj.ClassName .. " | " .. path .. "/" .. obj.Name)
-        end
-        if #obj:GetChildren() > 0 and not obj:IsA("Player") and not obj:IsA("Workspace") then
-            pcall(scanRemotes, obj, path .. "/" .. obj.Name)
-        end
-    end
-end
-log("[ReplicatedStorage]")
-pcall(scanRemotes, ReplicatedStorage)
-
-log("")
-log("----- TAGS -----")
-pcall(function()
-    local tags = {}
-    for _, inst in ipairs(workspace:GetDescendants()) do
-        for _, tag in ipairs(CollectionService:GetTags(inst)) do
-            tags[tag] = (tags[tag] or 0) + 1
-        end
-    end
-    for tag, count in pairs(tags) do
-        log("Tag: " .. tag .. " | " .. count)
-    end
-end)
-
-log("")
-log("----- WORKSPACE -----")
-for _, obj in ipairs(workspace:GetChildren()) do
-    log(obj.ClassName .. " | " .. obj.Name)
+local function tweenTo(pos, speed)
+    local root = getRoot()
+    if not root or not pos then return end
+    local dist = (root.Position - pos).Magnitude
+    if dist < 8 then return end
+    local t = math.clamp(dist / (speed or S.Speed), 0.4, 7)
+    local tw = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
+        CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+    })
+    tw:Play()
+    tw.Completed:Wait()
 end
 
-log("")
-log("----- EGGS -----")
-local eggCount = 0
-for _, obj in ipairs(workspace:GetDescendants()) do
-    local name = obj.Name:lower()
-    if (name:find("egg") or obj:GetAttribute("Egg") or obj:HasTag("Egg")) and eggCount < 6 then
-        eggCount += 1
-        log("Egg: " .. obj:GetFullName())
-        for attr, val in pairs(obj:GetAttributes()) do
-            log("  " .. attr .. " = " .. tostring(val))
-        end
+local function spamClick(n)
+    for i = 1, (n or 10) do
+        pcall(function()
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+            task.wait(0.03)
+            VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+        end)
+        task.wait(0.05)
     end
 end
-log("Eggs sample: " .. eggCount)
 
-log("")
-log("----- PETS -----")
-local petCount = 0
-for _, obj in ipairs(workspace:GetDescendants()) do
-    local name = obj.Name:lower()
-    if (name:find("pet") or obj:GetAttribute("Pet") or obj:HasTag("Pet")) and petCount < 6 then
-        petCount += 1
-        log("Pet: " .. obj:GetFullName())
-        for attr, val in pairs(obj:GetAttributes()) do
-            log("  " .. attr .. " = " .. tostring(val))
+local function firePrompts(obj)
+    if not obj then return end
+    pcall(function()
+        for _, v in ipairs(obj:GetDescendants()) do
+            if v:IsA("ProximityPrompt") then
+                fireproximityprompt(v)
+            end
         end
-        for _, d in ipairs(obj:GetDescendants()) do
-            if d:IsA("TextLabel") and d.Text ~= "" and #d.Text < 40 then
-                log("  Text: " .. d.Text)
+    end)
+end
+
+local function setHomeHere()
+    local root = getRoot()
+    if root then savedHome = root.Position return true end
+    return false
+end
+
+local function setEndMapHere()
+    local root = getRoot()
+    if root then savedEndMap = root.Position return true end
+    return false
+end
+
+local function getHomePos()
+    if savedHome then return savedHome end
+    local root = getRoot()
+    return root and root.Position or Vector3.new(0, 10, 0)
+end
+
+local function findWorldEgg()
+    local root = getRoot()
+    if not root then return nil end
+    local best, bestD = nil, 120
+    for _, egg in ipairs(CollectionService:GetTagged("SAE_WorldEgg")) do
+        if egg:IsDescendantOf(workspace) then
+            local pos = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
+            local d = (root.Position - pos).Magnitude
+            if d < bestD then
+                best, bestD = egg, d
             end
         end
     end
-end
-log("Pets sample: " .. petCount)
-
-log("")
-log("----- TOOLS -----")
-if lp.Character then
-    for _, v in ipairs(lp.Character:GetChildren()) do
-        if v:IsA("Tool") then log("CharTool: " .. v.Name) end
-    end
-end
-if lp:FindFirstChild("Backpack") then
-    for _, v in ipairs(lp.Backpack:GetChildren()) do
-        log("Backpack: " .. v.Name)
-    end
+    return best
 end
 
-log("")
-log("----- BASES -----")
-for _, name in ipairs({"Plots","Bases","PlayerPlots","Farms","Homes","Tycoons","PlayerBases"}) do
-    local f = workspace:FindFirstChild(name)
-    if f then
-        log("Folder: " .. name)
-        for i, p in ipairs(f:GetChildren()) do
-            if i <= 4 then
-                log("  " .. p.Name)
-                for attr, val in pairs(p:GetAttributes()) do
-                    log("    " .. attr .. " = " .. tostring(val))
+local function parseIncome(t)
+    if not t then return 0 end
+    t = tostring(t):lower():gsub(",",""):gsub("%$",""):gsub("%s","")
+    local n, s = t:match("([%d%.]+)([kmb]?)")
+    if not n then return 0 end
+    n = tonumber(n) or 0
+    if s == "k" then return n*1e3 end
+    if s == "m" then return n*1e6 end
+    if s == "b" then return n*1e9 end
+    return n
+end
+
+local function getIncome(obj)
+    local v = obj:GetAttribute("Income")
+    if type(v) == "number" and v > 0 then return v end
+    for _, a in ipairs({"MoneyPerSecond","Value","MPS","IncomeBeforeDiv10"}) do
+        local x = obj:GetAttribute(a)
+        if type(x) == "number" and x > 0 then return x end
+    end
+    for _, d in ipairs(obj:GetDescendants()) do
+        if d:IsA("TextLabel") and d.Text ~= "" then
+            local n = parseIncome(d.Text)
+            if n >= 1000 then return n end
+        end
+    end
+    return 0
+end
+
+local function findBestPet()
+    local root = getRoot()
+    if not root then return nil end
+    local best, bestInc, bestD = nil, 0, 80
+    for _, pet in ipairs(CollectionService:GetTagged("SAE_PenRoam")) do
+        local inc = getIncome(pet)
+        if inc >= S.MinIncome then
+            local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
+            local d = (root.Position - pos).Magnitude
+            if d < bestD or inc > bestInc then
+                best, bestInc, bestD = pet, inc, d
+            end
+        end
+    end
+    if not best then
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("Model") then
+                local inc = getIncome(obj)
+                if inc >= S.MinIncome then
+                    local pos = obj:GetPivot().Position
+                    local d = (root.Position - pos).Magnitude
+                    if d < 80 and (d < bestD or inc > bestInc) then
+                        best, bestInc, bestD = obj, inc, d
+                    end
                 end
             end
         end
     end
+    return best
 end
 
-log("")
-log("========== END DUMP ==========")
+local function autoSlashLoop()
+    while S.AutoSlash do
+        if savedEndMap then
+            local root = getRoot()
+            if root and (root.Position - savedEndMap).Magnitude > 45 then
+                tweenTo(savedEndMap, S.Speed)
+            end
+        end
+        local egg = findWorldEgg()
+        if egg then
+            local pos = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
+            tweenTo(pos, S.Speed)
+            spamClick(15)
+            firePrompts(egg)
+            local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
+            if tool then pcall(function() tool:Activate() end) end
+        end
+        task.wait(0.3)
+    end
+end
 
--- UI COPY BOX
+local function autoStealLoop()
+    while S.AutoSteal do
+        local pet = findBestPet()
+        if pet then
+            local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
+            tweenTo(pos, S.Speed + 5)
+            task.wait(0.2)
+            firePrompts(pet)
+            spamClick(8)
+            local prompt = pet:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt then pcall(fireproximityprompt, prompt) end
+            task.wait(0.6)
+            if S.BringHome then
+                local home = getHomePos()
+                tweenTo(home, S.ReturnSpeed)
+                task.wait(0.4)
+                firePrompts(workspace)
+            end
+        else
+            task.wait(0.7)
+        end
+        task.wait(0.35)
+    end
+end
+
 local gui = Instance.new("ScreenGui")
-gui.Name = "KietDumperUI"
+gui.Name = "KietSlashHub"
 gui.ResetOnSpawn = false
 gui.Parent = lp:WaitForChild("PlayerGui")
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0.92, 0, 0.75, 0)
-frame.Position = UDim2.new(0.04, 0, 0.12, 0)
-frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-frame.BorderSizePixel = 0
-frame.Parent = gui
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(290, 410)
+main.Position = UDim2.new(0, 10, 0.5, -205)
+main.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
+main.BorderSizePixel = 0
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+local st = Instance.new("UIStroke", main)
+st.Color = Color3.fromRGB(0, 190, 255)
+st.Thickness = 1.5
 
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 36)
+title.Size = UDim2.new(1, 0, 0, 34)
 title.BackgroundTransparency = 1
-title.Text = "Bôi đen chữ bên dưới → Copy → Gửi mình"
+title.Text = "Kiet Hub | Slash Pets"
 title.TextColor3 = Color3.fromRGB(0, 200, 255)
 title.Font = Enum.Font.GothamBold
-title.TextSize = 13
-title.Parent = frame
+title.TextSize = 15
+title.Parent = main
 
-local scroll = Instance.new("ScrollingFrame")
-scroll.Size = UDim2.new(1, -16, 1, -90)
-scroll.Position = UDim2.new(0, 8, 0, 40)
-scroll.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-scroll.BorderSizePixel = 0
-scroll.ScrollBarThickness = 8
-scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-scroll.Parent = frame
-Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 8)
+local function makeToggle(text, y, key, cb)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -20, 0, 32)
+    btn.Position = UDim2.new(0, 10, 0, y)
+    btn.BackgroundColor3 = Color3.fromRGB(30, 32, 42)
+    btn.Text = text .. ": OFF"
+    btn.TextColor3 = Color3.fromRGB(230, 230, 240)
+    btn.Font = Enum.Font.GothamMedium
+    btn.TextSize = 13
+    btn.Parent = main
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+    btn.MouseButton1Click:Connect(function()
+        S[key] = not S[key]
+        btn.Text = text .. ": " .. (S[key] and "ON" or "OFF")
+        btn.BackgroundColor3 = S[key] and Color3.fromRGB(0, 150, 210) or Color3.fromRGB(30, 32, 42)
+        if cb and S[key] then task.spawn(cb) end
+    end)
+end
 
-local box = Instance.new("TextBox")
-box.Size = UDim2.new(1, -10, 0, 800)
-box.Position = UDim2.new(0, 5, 0, 5)
-box.BackgroundTransparency = 1
-box.Text = table.concat(lines, "\n")
-box.TextColor3 = Color3.fromRGB(220, 220, 230)
-box.Font = Enum.Font.Code
-box.TextSize = 11
-box.TextXAlignment = Enum.TextXAlignment.Left
-box.TextYAlignment = Enum.TextYAlignment.Top
-box.TextWrapped = true
-box.ClearTextOnFocus = false
-box.MultiLine = true
-box.Parent = scroll
+makeToggle("Auto Slash Egg", 42, "AutoSlash", autoSlashLoop)
+makeToggle("Auto Steal Pet", 80, "AutoSteal", autoStealLoop)
+makeToggle("Bring Home", 118, "BringHome")
 
-scroll.CanvasSize = UDim2.new(0, 0, 0, 820)
-
-local closeBtn = Instance.new("TextButton")
-closeBtn.Size = UDim2.new(1, -16, 0, 36)
-closeBtn.Position = UDim2.new(0, 8, 1, -44)
-closeBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 200)
-closeBtn.Text = "Đóng"
-closeBtn.TextColor3 = Color3.new(1,1,1)
-closeBtn.Font = Enum.Font.GothamBold
-closeBtn.TextSize = 14
-closeBtn.Parent = frame
-Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
-closeBtn.MouseButton1Click:Connect(function()
-    gui:Destroy()
+local btnHome = Instance.new("TextButton")
+btnHome.Size = UDim2.new(1, -20, 0, 32)
+btnHome.Position = UDim2.new(0, 10, 0, 160)
+btnHome.BackgroundColor3 = Color3.fromRGB(35, 55, 40)
+btnHome.Text = "Set Home (Đứng ở base)"
+btnHome.TextColor3 = Color3.fromRGB(170, 255, 170)
+btnHome.Font = Enum.Font.GothamMedium
+btnHome.TextSize = 12
+btnHome.Parent = main
+Instance.new("UICorner", btnHome).CornerRadius = UDim.new(0, 7)
+btnHome.MouseButton1Click:Connect(function()
+    if setHomeHere() then
+        btnHome.Text = "Home Saved!"
+        task.delay(1.2, function() btnHome.Text = "Set Home (Đứng ở base)" end)
+    end
 end)
 
-print("[Kiet Dumper] UI hiện - bôi đen rồi Copy")
+local btnEnd = Instance.new("TextButton")
+btnEnd.Size = UDim2.new(1, -20, 0, 32)
+btnEnd.Position = UDim2.new(0, 10, 0, 200)
+btnEnd.BackgroundColor3 = Color3.fromRGB(55, 40, 35)
+btnEnd.Text = "Set Map Cuối (Đứng map cuối)"
+btnEnd.TextColor3 = Color3.fromRGB(255, 200, 160)
+btnEnd.Font = Enum.Font.GothamMedium
+btnEnd.TextSize = 12
+btnEnd.Parent = main
+Instance.new("UICorner", btnEnd).CornerRadius = UDim.new(0, 7)
+btnEnd.MouseButton1Click:Connect(function()
+    if setEndMapHere() then
+        btnEnd.Text = "Map Cuối Saved!"
+        task.delay(1.2, function() btnEnd.Text = "Set Map Cuối (Đứng map cuối)" end)
+    end
+end)
+
+local info = Instance.new("TextLabel")
+info.Size = UDim2.new(1, -20, 0, 110)
+info.Position = UDim2.new(0, 10, 0, 245)
+info.BackgroundTransparency = 1
+info.Text = "Dùng tag SAE_WorldEgg\n1. Set Home ở base\n2. Set Map Cuối\n3. Bật Auto Slash + Steal\nChỉ lấy pet ≥ 20M/s"
+info.TextColor3 = Color3.fromRGB(140, 150, 170)
+info.Font = Enum.Font.Gotham
+info.TextSize = 12
+info.TextWrapped = true
+info.TextYAlignment = Enum.TextYAlignment.Top
+info.Parent = main
+
+local icon = Instance.new("TextButton")
+icon.Size = UDim2.fromOffset(46, 46)
+icon.Position = UDim2.new(1, -58, 0, 70)
+icon.BackgroundColor3 = Color3.fromRGB(0, 170, 230)
+icon.Text = "K"
+icon.TextColor3 = Color3.new(1,1,1)
+icon.Font = Enum.Font.GothamBold
+icon.TextSize = 18
+icon.Parent = gui
+Instance.new("UICorner", icon).CornerRadius = UDim.new(1, 0)
+icon.MouseButton1Click:Connect(function()
+    main.Visible = not main.Visible
+end)
+
+local drag, sPos, sInput
+main.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        drag = true
+        sPos = main.Position
+        sInput = i.Position
+    end
+end)
+main.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        drag = false
+    end
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - sInput
+        main.Position = UDim2.new(sPos.X.Scale, sPos.X.Offset + d.X, sPos.Y.Scale, sPos.Y.Offset + d.Y)
+    end
+end)
+
+print("[Kiet Hub] SAE_WorldEgg version loaded")
