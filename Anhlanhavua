@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub v3 - Slash and Steal Pets
+    Kiet Hub v5 - Slash and Steal Pets (Take pet từ WorldPet)
     - UI mới: 3 tab (Farm / Setup / Log), có log trạng thái
     - Steal: kiểm tra có nhận được pet (tool mới trong Backpack) hay chưa
     - Place: đặt pet về base (thử prompt có chữ place/đặt trong base của bạn)
@@ -24,6 +24,7 @@ local S = {
     AutoSlash = false,
     AutoSteal = false,
     BringHome = true,
+    AutoTake = true,
     MinIncome = 20e6,
     Speed = 55,
     ReturnSpeed = 40,
@@ -174,30 +175,6 @@ local function attrs(inst)
     return table.concat(t, ", ")
 end
 
--- Base của mình: ưu tiên theo pet đang đặt (SAE_OwnerUserId), không có thì lấy plot gần Home nhất
-local function getMyPlot()
-    local myId = tostring(lp.UserId)
-    for _, tagged in ipairs(CollectionService:GetTagged("SAE_PetUnplacePrompt")) do
-        local pr = asPrompt(tagged)
-        if pr and tostring(pr:GetAttribute("SAE_OwnerUserId")) == myId then
-            local plot = ancestorWithTag(pr, "SAE_Plot")
-            if plot then return plot end
-        end
-    end
-    if savedHome then
-        local best, bd = nil, math.huge
-        for _, plot in ipairs(CollectionService:GetTagged("SAE_Plot")) do
-            local c = plotCenter(plot)
-            if c then
-                local d = (c - savedHome).Magnitude
-                if d < bd then best, bd = plot, d end
-            end
-        end
-        return best
-    end
-    return nil
-end
-
 ----------------------------------------------------------------
 -- Tool tracking (pet nhận được = tool mới trong Backpack)
 ----------------------------------------------------------------
@@ -243,153 +220,157 @@ local function waitNewTool(before, timeout)
 end
 
 ----------------------------------------------------------------
--- Place pet về base
+-- Take pet: egg nở thành WorldPet, prompt "TakeEgg" (Take pet, giữ 1s)
 ----------------------------------------------------------------
-local PLACE_WORDS = { "place", "put", "đặt", "dat ", "drop", "deposit" }
-local BAD_WORDS = { "unplace", "pick", "steal", "take", "buy", "sell", "upgrade" }
-
-local function looksLikePlace(prompt)
-    local s = (prompt.ActionText .. " " .. prompt.ObjectText):lower()
-    for _, w in ipairs(BAD_WORDS) do
-        if s:find(w, 1, true) then return false end
-    end
-    for _, w in ipairs(PLACE_WORDS) do
-        if s:find(w, 1, true) then return true end
-    end
-    return false
+local function nowServer()
+    local ok, t = pcall(function() return workspace:GetServerTimeNow() end)
+    return ok and t or os.time()
 end
 
-local function placePet(tool)
-    setStatus("Đang đặt pet về base")
-    local plot = getMyPlot()
-    local home = savedHome or (plot and plotCenter(plot)) or startPos
-    if not plot then
-        log("Không xác định được base của bạn. Hãy bấm 'Set Home' khi đứng ở base.")
-    end
-
-    local char = lp.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if hum and tool.Parent ~= char then
-        hum:EquipTool(tool)
-        task.wait(0.25)
-    end
-    tweenTo(home, S.ReturnSpeed)
-    if not plot then return false end
-
-    local function gone()
-        return tool.Parent ~= lp.Character and tool.Parent ~= lp:FindFirstChildOfClass("Backpack")
-    end
-
-    local root = getRoot()
-    local cands = {}
-    for _, d in ipairs(plot:GetDescendants()) do
-        if d:IsA("ProximityPrompt") and d.Enabled and looksLikePlace(d) then
-            local pos = getPos(d.Parent)
-            if pos and root then
-                cands[#cands + 1] = { p = d, pos = pos, dist = (root.Position - pos).Magnitude }
-            end
-        end
-    end
-    table.sort(cands, function(a, b) return a.dist < b.dist end)
-
-    if #cands == 0 then
-        log("Không thấy prompt 'place/đặt' trong base. Dùng tab Setup > Ghi lại thao tác để gửi cách đặt pet.")
-        return false
-    end
-
-    for i = 1, math.min(#cands, 4) do
-        local c = cands[i]
-        tweenTo(c.pos, S.ReturnSpeed)
-        pcall(function() c.p.HoldDuration = 0 end)
-        pcall(fireproximityprompt, c.p)
-        task.wait(0.5)
-        log("Thử prompt: " .. c.p:GetFullName())
-        if gone() then
-            log("Đặt pet thành công")
-            return true
-        end
-    end
-    log("Đã thử nhưng pet vẫn còn trong túi")
-    return false
-end
-
-----------------------------------------------------------------
--- Steal
-----------------------------------------------------------------
-local function findBestTarget()
+-- onlyMine: chỉ pet do mình nở | excludeMine: chỉ pet người khác nở
+local function findTakeable(onlyMine, excludeMine)
     local myId = tostring(lp.UserId)
-    local now = os.clock()
-    local best, bestInc = nil, 0
-    for _, tagged in ipairs(CollectionService:GetTagged("SAE_PetUnplacePrompt")) do
-        local prompt = tagged:IsDescendantOf(workspace) and asPrompt(tagged)
-        if prompt and prompt.Enabled and not (tried[prompt] and now - tried[prompt] < 8) then
-            local pet = petOf(prompt)
-            local owner = prompt:GetAttribute("SAE_OwnerUserId")
-            if owner == nil and pet then owner = pet:GetAttribute("SAE_OwnerUserId") end
-            if pet and owner ~= nil and tostring(owner) ~= myId then
-                local inc = petIncome(pet)
-                if inc >= S.MinIncome and inc > bestInc then
-                    best, bestInc = { pet = pet, prompt = prompt, inc = inc, owner = owner }, inc
-                end
-            end
+    local seen, list = {}, {}
+    local function consider(m)
+        if seen[m] or not m:IsA("Model") then return end
+        seen[m] = true
+        if m:GetAttribute("SAE_HatchState") ~= "hatched" then return end
+        local expire = m:GetAttribute("SAE_PetExpireAt")
+        if type(expire) == "number" and expire - nowServer() < 3 then return end
+        local prompt = m:FindFirstChild("TakeEgg", true)
+        if not (prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled) then return end
+        local mine = tostring(m:GetAttribute("SAE_HatchBy")) == myId
+        if onlyMine and not mine then return end
+        if excludeMine and mine then return end
+        list[#list + 1] = { pet = m, prompt = prompt, mine = mine }
+    end
+    local world = workspace:FindFirstChild("SAE_World")
+    if world then
+        for _, m in ipairs(world:GetChildren()) do consider(m) end
+    end
+    for _, m in ipairs(CollectionService:GetTagged("SAE_WorldEgg")) do consider(m) end
+    return list
+end
+
+local function worldPetIncome(m)
+    local inc = petIncome(m)
+    if inc > 0 then return inc end
+    local v = m:GetAttribute("SAE_HatchIncome")
+    return type(v) == "number" and v or 0
+end
+
+local function pickNearest(list, maxD)
+    local root = getRoot()
+    if not root then return nil end
+    local best, bd = nil, maxD
+    for _, it in ipairs(list) do
+        local pos = getPos(it.pet)
+        if pos then
+            local d = (root.Position - pos).Magnitude
+            if d < bd then best, bd = it, d end
         end
     end
     return best
 end
 
-local function stealOnce()
-    local target = findBestTarget()
-    if not target then return false end
-    local prompt, pet = target.prompt, target.pet
-    tried[prompt] = os.clock()
-
-    setStatus("Đang tới " .. pet.Name)
-    log(("Target: %s (%s/s) chủ %s"):format(pet.Name, fmtNum(target.inc), tostring(target.owner)))
+local function takePet(item)
+    local pet, prompt = item.pet, item.prompt
+    local name = tostring(pet:GetAttribute("DisplayName") or pet.Name)
+    setStatus("Đang lấy " .. name)
     tweenTo(getPos(pet), S.Speed + 5)
-    if not S.AutoSteal then return true end
 
-    setStatus("Đang lấy pet")
     local before = snapshotTools()
     local origHold = prompt.HoldDuration
-    local got
+    local function taken()
+        return not prompt:IsDescendantOf(workspace) or not prompt.Enabled
+            or not pet:IsDescendantOf(workspace) or newTool(before) ~= nil
+    end
 
     -- Cách 1: fireproximityprompt
     pcall(function()
         prompt.HoldDuration = 0
         prompt.RequiresLineOfSight = false
     end)
-    for _ = 1, 3 do
-        if not prompt:IsDescendantOf(workspace) then break end
+    for _ = 1, 2 do
         pcall(fireproximityprompt, prompt)
-        got = waitNewTool(before, 0.8)
-        if got then break end
+        local t0 = os.clock()
+        repeat task.wait(0.1) until taken() or os.clock() - t0 > 0.8
+        if taken() then break end
     end
 
-    -- Cách 2: giữ prompt thật theo HoldDuration gốc
-    if not got and prompt:IsDescendantOf(workspace) then
-        log("fireproximityprompt không ăn, thử giữ prompt thật...")
+    -- Cách 2: giữ prompt thật theo HoldDuration gốc (1s)
+    if not taken() then
+        log("fire không ăn, giữ prompt thật " .. tostring(origHold) .. "s")
         pcall(function() prompt.HoldDuration = origHold end)
         pcall(function() prompt:InputHoldBegin() end)
         task.wait(origHold + 0.2)
         pcall(function() prompt:InputHoldEnd() end)
-        got = waitNewTool(before, 1.2)
+        local t0 = os.clock()
+        repeat task.wait(0.1) until taken() or os.clock() - t0 > 1.2
     end
 
-    if got then
+    if taken() then
         stats.pets += 1
-        log("Đã nhận pet: " .. got.Name)
-    else
-        log("Chưa nhận được pet (không có tool mới trong Backpack)")
+        updateStats()
+        local tool = newTool(before)
+        log("Đã lấy " .. name .. (tool and (" -> tool " .. tool.Name) or " (không có tool mới trong túi)"))
+        return true, tool, before
     end
-    updateStats()
+    log("Chưa lấy được " .. name)
+    return false, nil, before
+end
 
-    if S.BringHome then
-        if got then
-            placePet(got)
-        else
-            tweenTo(savedHome or startPos, S.ReturnSpeed)
+-- Lấy pet xong: chạy về điểm nhận (Home), pet sẽ tự vào túi. Vào base thì tự bấm Trang bị.
+local function afterTake(ok, tool, before)
+    if not ok or not S.BringHome then return end
+    local home = savedHome or startPos
+    if home then
+        setStatus("Chạy về điểm nhận pet")
+        tweenTo(home, S.ReturnSpeed)
+    end
+    setStatus("Chờ pet vào túi")
+    local got = tool or newTool(before) or waitNewTool(before, 8)
+    if got then
+        log("Pet đã vào túi: " .. got.Name)
+    else
+        log("Đã về điểm nhưng chưa thấy pet vào túi. Kiểm tra lại Set Home (phải đúng điểm nhận pet).")
+    end
+end
+
+-- Sau khi chém egg: chờ nở rồi nhặt pet của mình
+local function collectOwnHatch()
+    local t0 = os.clock()
+    local item
+    repeat
+        item = pickNearest(findTakeable(true, false), 150)
+        if item then break end
+        task.wait(0.3)
+    until os.clock() - t0 > 9
+    if not item then
+        log("Không thấy pet vừa nở để nhặt")
+        return
+    end
+    local ok, tool, before = takePet(item)
+    afterTake(ok, tool, before)
+end
+
+-- Steal: nhặt pet người khác vừa nở (>= min income)
+local function stealOnce()
+    local now = os.clock()
+    local best, bestInc = nil, 0
+    for _, it in ipairs(findTakeable(false, true)) do
+        if not (tried[it.prompt] and now - tried[it.prompt] < 8) then
+            local inc = worldPetIncome(it.pet)
+            if inc >= S.MinIncome and inc > bestInc then best, bestInc = it, inc end
         end
     end
+    if not best then return false end
+    tried[best.prompt] = now
+    log(("Steal: %s (%s/s) chủ %s"):format(
+        tostring(best.pet:GetAttribute("DisplayName") or best.pet.Name),
+        fmtNum(bestInc), tostring(best.pet:GetAttribute("SAE_HatchBy"))))
+    local ok, tool, before = takePet(best)
+    afterTake(ok, tool, before)
     return true
 end
 
@@ -465,6 +446,7 @@ local function slashOnce()
     if not egg:IsDescendantOf(workspace) or (egg:GetAttribute("SAE_EggHP") or 0) <= 0 then
         stats.eggs += 1
         updateStats()
+        if S.AutoTake and S.AutoSlash then collectOwnHatch() end
     end
 end
 
@@ -851,8 +833,9 @@ end
 -- Trang Farm
 local farm = listPage("Farm")
 switchRow(farm, "Auto Slash Egg", "AutoSlash", refresh)
-switchRow(farm, "Auto Steal Pet", "AutoSteal", refresh)
-switchRow(farm, "Mang về & đặt vào base", "BringHome")
+switchRow(farm, "Auto Steal (pet người khác)", "AutoSteal", refresh)
+switchRow(farm, "Tự nhặt pet sau khi nở", "AutoTake")
+switchRow(farm, "Chạy về điểm nhận pet", "BringHome")
 
 local statusBox = mk("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.panel }, farm)
 corner(statusBox, 10)
@@ -881,7 +864,7 @@ updateStats()
 mk("TextLabel", {
     Size = UDim2.new(1, 0, 0, 56),
     BackgroundTransparency = 1,
-    Text = "1. Setup: Set Home ở base, Set Map Cuối\n2. Bật Auto Slash / Auto Steal\nChỉ lấy pet >= min income (tab Setup)",
+    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg rồi tự nhặt pet\n3. Auto Steal: nhặt pet người khác vừa nở (>= min income)\nVào base: tự bấm Trang bị",
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top,
@@ -897,7 +880,7 @@ inputRow(setup, "Tốc độ bay", function() return S.Speed end, function(v)
     S.Speed = math.clamp(v, 10, 150)
     S.ReturnSpeed = math.max(S.Speed - 15, 10)
 end)
-actionButton(setup, "Set Home (đứng ở base)", C.ok, function()
+actionButton(setup, "Set Home (đứng ở điểm nhận pet)", C.ok, function()
     local r = getRoot()
     if r then
         savedHome = r.Position
@@ -1022,5 +1005,5 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v3 sẵn sàng")
-print("[Kiet Hub] v3 loaded")
+log("Kiet Hub v5 sẵn sàng")
+print("[Kiet Hub] v5 loaded")
