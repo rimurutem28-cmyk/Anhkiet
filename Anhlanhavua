@@ -1,7 +1,6 @@
 --[[
-    Kiet Hub - Game Info Dumper
-    Dùng để lấy thông tin chính xác của Slash and Steal Pets
-    Chạy script này → copy toàn bộ output trong Console/F9 gửi lại
+    Kiet Hub - Game Info Dumper (Mobile Friendly)
+    Hiện hộp chữ để copy dễ trên điện thoại
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -13,35 +12,35 @@ local CollectionService = game:GetService("CollectionService")
 local lp = Players.LocalPlayer
 repeat task.wait() until lp
 
-print("========== KIET GAME INFO DUMPER ==========")
-print("Game:", game.PlaceId, game.Name)
-print("Player:", lp.Name, lp.UserId)
-print("")
+local lines = {}
+local function log(str)
+    str = tostring(str)
+    table.insert(lines, str)
+    print(str)
+end
 
--- 1. Remotes
-print("----- REMOTES / BINDABLE -----")
+log("========== KIET GAME INFO DUMPER ==========")
+log("Game: " .. tostring(game.PlaceId) .. " | " .. tostring(game.Name))
+log("Player: " .. lp.Name .. " | " .. tostring(lp.UserId))
+log("")
+
+log("----- REMOTES -----")
 local function scanRemotes(parent, path)
     path = path or parent.Name
     for _, obj in ipairs(parent:GetChildren()) do
         if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("UnreliableRemoteEvent") then
-            print(obj.ClassName .. " | " .. path .. "/" .. obj.Name)
+            log(obj.ClassName .. " | " .. path .. "/" .. obj.Name)
         end
-        if #obj:GetChildren() > 0 and not obj:IsA("Player") then
-            scanRemotes(obj, path .. "/" .. obj.Name)
+        if #obj:GetChildren() > 0 and not obj:IsA("Player") and not obj:IsA("Workspace") then
+            pcall(scanRemotes, obj, path .. "/" .. obj.Name)
         end
     end
 end
+log("[ReplicatedStorage]")
+pcall(scanRemotes, ReplicatedStorage)
 
-print("[ReplicatedStorage]")
-scanRemotes(ReplicatedStorage)
-
-if game:GetService("ReplicatedFirst") then
-    print("\n[ReplicatedFirst]")
-    pcall(function() scanRemotes(game:GetService("ReplicatedFirst")) end)
-end
-
--- 2. CollectionService Tags
-print("\n----- COLLECTION SERVICE TAGS -----")
+log("")
+log("----- TAGS -----")
 pcall(function()
     local tags = {}
     for _, inst in ipairs(workspace:GetDescendants()) do
@@ -50,104 +49,146 @@ pcall(function()
         end
     end
     for tag, count in pairs(tags) do
-        print("Tag:", tag, "| Count:", count)
+        log("Tag: " .. tag .. " | " .. count)
     end
 end)
 
--- 3. Workspace structure (top level)
-print("\n----- WORKSPACE TOP LEVEL -----")
+log("")
+log("----- WORKSPACE -----")
 for _, obj in ipairs(workspace:GetChildren()) do
-    print(obj.ClassName, "|", obj.Name)
+    log(obj.ClassName .. " | " .. obj.Name)
 end
 
--- 4. Find Eggs
-print("\n----- EGGS (sample) -----")
+log("")
+log("----- EGGS -----")
 local eggCount = 0
 for _, obj in ipairs(workspace:GetDescendants()) do
     local name = obj.Name:lower()
-    if (name:find("egg") or obj:GetAttribute("Egg") or obj:HasTag("Egg")) and eggCount < 8 then
+    if (name:find("egg") or obj:GetAttribute("Egg") or obj:HasTag("Egg")) and eggCount < 6 then
         eggCount += 1
-        print("Egg:", obj:GetFullName())
-        print("  Class:", obj.ClassName)
+        log("Egg: " .. obj:GetFullName())
         for attr, val in pairs(obj:GetAttributes()) do
-            print("  Attr:", attr, "=", val)
-        end
-        for _, c in ipairs(obj:GetChildren()) do
-            if c:IsA("ProximityPrompt") or c:IsA("ClickDetector") or c:IsA("BasePart") then
-                print("  Child:", c.ClassName, c.Name)
-            end
+            log("  " .. attr .. " = " .. tostring(val))
         end
     end
 end
-print("Total eggs found (sample max 8):", eggCount)
+log("Eggs sample: " .. eggCount)
 
--- 5. Find Pets
-print("\n----- PETS (sample) -----")
+log("")
+log("----- PETS -----")
 local petCount = 0
 for _, obj in ipairs(workspace:GetDescendants()) do
     local name = obj.Name:lower()
-    if (name:find("pet") or obj:GetAttribute("Pet") or obj:HasTag("Pet")) and petCount < 8 then
+    if (name:find("pet") or obj:GetAttribute("Pet") or obj:HasTag("Pet")) and petCount < 6 then
         petCount += 1
-        print("Pet:", obj:GetFullName())
-        print("  Class:", obj.ClassName)
+        log("Pet: " .. obj:GetFullName())
         for attr, val in pairs(obj:GetAttributes()) do
-            print("  Attr:", attr, "=", val)
+            log("  " .. attr .. " = " .. tostring(val))
         end
-        -- Billboards
         for _, d in ipairs(obj:GetDescendants()) do
-            if d:IsA("TextLabel") and d.Text ~= "" then
-                print("  Text:", d.Text)
+            if d:IsA("TextLabel") and d.Text ~= "" and #d.Text < 40 then
+                log("  Text: " .. d.Text)
             end
         end
     end
 end
-print("Total pets found (sample max 8):", petCount)
+log("Pets sample: " .. petCount)
 
--- 6. Player character tools
-print("\n----- CHARACTER / TOOLS -----")
-local char = lp.Character
-if char then
-    for _, v in ipairs(char:GetChildren()) do
-        print(v.ClassName, v.Name)
+log("")
+log("----- TOOLS -----")
+if lp.Character then
+    for _, v in ipairs(lp.Character:GetChildren()) do
+        if v:IsA("Tool") then log("CharTool: " .. v.Name) end
     end
-    local backpack = lp:FindFirstChild("Backpack")
-    if backpack then
-        print("[Backpack]")
-        for _, v in ipairs(backpack:GetChildren()) do
-            print(" ", v.ClassName, v.Name)
-        end
+end
+if lp:FindFirstChild("Backpack") then
+    for _, v in ipairs(lp.Backpack:GetChildren()) do
+        log("Backpack: " .. v.Name)
     end
 end
 
--- 7. Possible base/plot
-print("\n----- POSSIBLE BASES / PLOTS -----")
-for _, name in ipairs({"Plots", "Bases", "PlayerPlots", "Farms", "Homes", "Tycoons", "PlayerBases", "Plot"}) do
+log("")
+log("----- BASES -----")
+for _, name in ipairs({"Plots","Bases","PlayerPlots","Farms","Homes","Tycoons","PlayerBases"}) do
     local f = workspace:FindFirstChild(name)
     if f then
-        print("Found folder:", name)
+        log("Folder: " .. name)
         for i, p in ipairs(f:GetChildren()) do
-            if i <= 5 then
-                print("  ", p.Name, p.ClassName)
+            if i <= 4 then
+                log("  " .. p.Name)
                 for attr, val in pairs(p:GetAttributes()) do
-                    print("    Attr:", attr, "=", val)
+                    log("    " .. attr .. " = " .. tostring(val))
                 end
             end
         end
     end
 end
 
--- 8. Shared / Controllers
-print("\n----- getrenv().shared / Controllers -----")
-pcall(function()
-    local shared = getrenv().shared
-    if shared then
-        for k, v in pairs(shared) do
-            print("shared." .. tostring(k), type(v))
-        end
-    else
-        print("No getrenv().shared")
-    end
+log("")
+log("========== END DUMP ==========")
+
+-- UI COPY BOX
+local gui = Instance.new("ScreenGui")
+gui.Name = "KietDumperUI"
+gui.ResetOnSpawn = false
+gui.Parent = lp:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0.92, 0, 0.75, 0)
+frame.Position = UDim2.new(0.04, 0, 0.12, 0)
+frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+frame.BorderSizePixel = 0
+frame.Parent = gui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 36)
+title.BackgroundTransparency = 1
+title.Text = "Bôi đen chữ bên dưới → Copy → Gửi mình"
+title.TextColor3 = Color3.fromRGB(0, 200, 255)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 13
+title.Parent = frame
+
+local scroll = Instance.new("ScrollingFrame")
+scroll.Size = UDim2.new(1, -16, 1, -90)
+scroll.Position = UDim2.new(0, 8, 0, 40)
+scroll.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+scroll.BorderSizePixel = 0
+scroll.ScrollBarThickness = 8
+scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+scroll.Parent = frame
+Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 8)
+
+local box = Instance.new("TextBox")
+box.Size = UDim2.new(1, -10, 0, 800)
+box.Position = UDim2.new(0, 5, 0, 5)
+box.BackgroundTransparency = 1
+box.Text = table.concat(lines, "\n")
+box.TextColor3 = Color3.fromRGB(220, 220, 230)
+box.Font = Enum.Font.Code
+box.TextSize = 11
+box.TextXAlignment = Enum.TextXAlignment.Left
+box.TextYAlignment = Enum.TextYAlignment.Top
+box.TextWrapped = true
+box.ClearTextOnFocus = false
+box.MultiLine = true
+box.Parent = scroll
+
+scroll.CanvasSize = UDim2.new(0, 0, 0, 820)
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(1, -16, 0, 36)
+closeBtn.Position = UDim2.new(0, 8, 1, -44)
+closeBtn.BackgroundColor3 = Color3.fromRGB(0, 140, 200)
+closeBtn.Text = "Đóng"
+closeBtn.TextColor3 = Color3.new(1,1,1)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 14
+closeBtn.Parent = frame
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
+closeBtn.MouseButton1Click:Connect(function()
+    gui:Destroy()
 end)
 
-print("\n========== END DUMP ==========")
-print("Copy toàn bộ dòng trên (từ KIET GAME INFO đến END DUMP) gửi lại cho mình")
+print("[Kiet Dumper] UI hiện - bôi đen rồi Copy")
