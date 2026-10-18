@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub v11 - Slash and Steal Pets (Take pet từ WorldPet)
+    Kiet Hub v12 - Slash and Steal Pets (Take pet từ WorldPet)
     - UI mới: 3 tab (Farm / Setup / Log), có log trạng thái
     - Steal: kiểm tra có nhận được pet (tool mới trong Backpack) hay chưa
     - Place: đặt pet về base (thử prompt có chữ place/đặt trong base của bạn)
@@ -21,6 +21,8 @@ local playerGui = lp:WaitForChild("PlayerGui")
 
 local oldGui = playerGui:FindFirstChild("KietSlashHub")
 if oldGui then oldGui:Destroy() end
+local env = (getgenv and getgenv()) or _G
+if env.KietHubStop then pcall(env.KietHubStop) end
 
 local S = {
     AutoSlash = false,
@@ -44,6 +46,16 @@ local conns = {}
 local stats = { eggs = 0, pets = 0 }
 local carry = { active = false, lost = false, reason = nil, uid = nil }
 local moving = { tele = false, untilT = 0 }
+local VERSION = "v12"
+
+env.KietHubStop = function()
+    alive = false
+    S.AutoSlash, S.AutoSteal = false, false
+    if curTween then pcall(function() curTween:Cancel() end) end
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    local g = playerGui:FindFirstChild("KietSlashHub")
+    if g then g:Destroy() end
+end
 
 ----------------------------------------------------------------
 -- Log / status (UI gán sau)
@@ -853,7 +865,7 @@ mk("TextLabel", {
     Size = UDim2.new(1, -90, 0, 14),
     Position = UDim2.fromOffset(14, 23),
     BackgroundTransparency = 1,
-    Text = "Slash & Steal Pets",
+    Text = "Slash & Steal Pets · " .. VERSION,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextColor3 = C.sub,
     Font = Enum.Font.Gotham,
@@ -1242,5 +1254,5 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v11 sẵn sàng")
-print("[Kiet Hub] v11 loaded")
+log("Kiet Hub v12 sẵn sàng")
+print("[Kiet Hub] v12 loaded")
