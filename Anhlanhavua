@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub V6 - Slash and Steal Pets (Auto Carry Detection & Multi-Interact)
+    Kiet Hub V7 - Redesigned UI & Ultimate Pet Steal
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -24,6 +24,7 @@ local savedHome = nil
 local savedEndMap = nil
 local isReturning = false
 local noclipConnection = nil
+local statusText = "Đang chờ bật tính năng..."
 
 local function getRoot()
     local char = lp.Character
@@ -35,7 +36,6 @@ local function getRoot()
     return nil
 end
 
--- Tắt va chạm map khi di chuyển về base
 local function enableNoclip(state)
     if state then
         if not noclipConnection then
@@ -65,7 +65,6 @@ local function safeMoveTo(pos, speed)
     if dist < 4 then return end
     
     enableNoclip(true)
-    
     local spd = speed or S.Speed
     local t = dist / spd
     
@@ -83,22 +82,19 @@ local function safeMoveTo(pos, speed)
     end
     
     enableNoclip(false)
-    task.wait(0.2)
+    task.wait(0.15)
 end
 
--- KIỂM TRA XEM NHÂN VẬT CÓ ĐANG CẦM/MANG PET KHÔNG
 local function isCarryingPet()
     local char = lp.Character
     if not char then return false end
     
-    -- 1. Kiểm tra Tool đang cầm trên tay hoặc trong Backpack
     for _, item in ipairs(char:GetChildren()) do
         if item:IsA("Tool") and (item.Name:lower():find("pet") or item.Name:lower():find("egg") or item:GetAttribute("Pet")) then
             return true
         end
     end
     
-    -- 2. Kiểm tra Pet dính trên người (Model/Weld)
     for _, child in ipairs(char:GetChildren()) do
         if child:IsA("Model") or child:IsA("BasePart") then
             local n = child.Name:lower()
@@ -108,7 +104,6 @@ local function isCarryingPet()
         end
     end
     
-    -- 3. Kiểm tra Attribute trạng thái
     if char:GetAttribute("Carrying") or char:GetAttribute("HasPet") or lp:GetAttribute("Carrying") then
         return true
     end
@@ -116,11 +111,9 @@ local function isCarryingPet()
     return false
 end
 
--- TƯƠNG TÁC ĐA NĂNG (Gồm Prompt + Chạm Hitbox TouchInterest)
 local function interactPet(obj)
     if not obj then return end
     
-    -- 1. Kích hoạt ProximityPrompt
     for _, prompt in ipairs(obj:GetDescendants()) do
         if prompt:IsA("ProximityPrompt") then
             pcall(function()
@@ -132,7 +125,6 @@ local function interactPet(obj)
         end
     end
     
-    -- 2. Chạm trực tiếp Hitbox (Dành cho game nhận TouchInterest)
     local root = getRoot()
     if root then
         for _, part in ipairs(obj:GetDescendants()) do
@@ -147,7 +139,6 @@ local function interactPet(obj)
     end
 end
 
--- TÌM PET GẦN NHẤT HOẶC TRÊN BẢN ĐỒ
 local function findPetObject()
     local root = getRoot()
     if not root then return nil end
@@ -174,166 +165,175 @@ local function findPetObject()
     return bestObj
 end
 
--- VÒNG LẶP KIỂM TRA LẤY PET & VÀO BASE (LIÊN TỤC 0.1s)
-task.spawn(function()
-    while true do
-        task.wait(0.1)
-        
-        -- A. NẾU PHÁT HIỆN ĐANG MANG PET (TỰ BẮT HOẶC AUTO BẮT) -> CHẠY NGAY VỀ BASE
-        if S.BringHome and savedHome and isCarryingPet() and not isReturning then
-            isReturning = true
-            print("[Kiet Hub] Đã phát hiện Pet trên người! Đang quay về Base...")
-            safeMoveTo(savedHome, S.ReturnSpeed)
-            task.wait(0.8) -- Đợi Base nhận Pet
-            isReturning = false
-        end
-        
-        -- B. AUTO BẮT PET
-        if S.AutoSteal and not isReturning and not isCarryingPet() then
-            local pet = findPetObject()
-            if pet then
-                local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
-                
-                -- Bay lại gần Pet
-                safeMoveTo(pos, S.Speed)
-                task.wait(0.1)
-                
-                -- Thực hiện nhặt/bắt Pet
-                interactPet(pet)
-                task.wait(0.3)
-            end
-        end
-        
-        -- C. AUTO SLASH TRỨNG
-        if S.AutoSlash and not isReturning and not isCarryingPet() then
-            if savedEndMap then
-                local root = getRoot()
-                if root and (root.Position - savedEndMap).Magnitude > 15 then
-                    safeMoveTo(savedEndMap, S.Speed)
-                end
-            end
-            
-            -- Tự dùng Tool chém
-            local char = lp.Character
-            local tool = char and char:FindFirstChildOfClass("Tool")
-            if not tool then
-                local backpack = lp:FindFirstChild("Backpack")
-                if backpack then
-                    tool = backpack:FindFirstChildOfClass("Tool")
-                    if tool then tool.Parent = char end
-                end
-            end
-            if tool then pcall(function() tool:Activate() end) end
-        end
-    end
-end)
-
--- GIAO DIỆN GUI KIET HUB V6
+-- GUI REDESIGN (NEON MODERN STYLE)
 local gui = Instance.new("ScreenGui")
-gui.Name = "KietSlashHub_V6"
+gui.Name = "KietHub_V7_UI"
 gui.ResetOnSpawn = false
 gui.Parent = lp:WaitForChild("PlayerGui")
 
 local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(290, 380)
-main.Position = UDim2.new(0, 10, 0.5, -190)
-main.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
+main.Size = UDim2.fromOffset(300, 420)
+main.Position = UDim2.new(0.5, -150, 0.5, -210)
+main.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
 main.BorderSizePixel = 0
 main.Parent = gui
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 14)
 
-local st = Instance.new("UIStroke", main)
-st.Color = Color3.fromRGB(0, 190, 255)
-st.Thickness = 1.5
+local stroke = Instance.new("UIStroke", main)
+stroke.Color = Color3.fromRGB(0, 230, 255)
+stroke.Thickness = 2
+stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+-- Top Title Bar
+local titleBg = Instance.new("Frame")
+titleBg.Size = UDim2.new(1, 0, 0, 42)
+titleBg.BackgroundColor3 = Color3.fromRGB(28, 31, 40)
+titleBg.BorderSizePixel = 0
+titleBg.Parent = main
+Instance.new("UICorner", titleBg).CornerRadius = UDim.new(0, 14)
 
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 34)
+title.Size = UDim2.new(1, -20, 1, 0)
+title.Position = UDim2.new(0, 12, 0, 0)
 title.BackgroundTransparency = 1
-title.Text = "Kiet Hub V6 | Ultimate Auto Return"
-title.TextColor3 = Color3.fromRGB(0, 200, 255)
+title.Text = "⚡ KIET HUB  |  V7 ULTIMATE"
+title.TextColor3 = Color3.fromRGB(0, 230, 255)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
-title.Parent = main
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = titleBg
 
-local function makeToggle(text, y, key)
+-- Status Card
+local statusCard = Instance.new("Frame")
+statusCard.Size = UDim2.new(1, -24, 0, 36)
+statusCard.Position = UDim2.new(0, 12, 0, 50)
+statusCard.BackgroundColor3 = Color3.fromRGB(12, 14, 18)
+statusCard.BorderSizePixel = 0
+statusCard.Parent = main
+Instance.new("UICorner", statusCard).CornerRadius = UDim.new(0, 8)
+
+local statusLbl = Instance.new("TextLabel")
+statusLbl.Size = UDim2.new(1, -16, 1, 0)
+statusLbl.Position = UDim2.new(0, 8, 0, 0)
+statusLbl.BackgroundTransparency = 1
+statusLbl.Text = "📌 Trạng thái: Ready"
+statusLbl.TextColor3 = Color3.fromRGB(180, 200, 220)
+statusLbl.Font = Enum.Font.GothamMedium
+statusLbl.TextSize = 11
+statusLbl.TextXAlignment = Enum.TextXAlignment.Left
+statusLbl.Parent = statusCard
+
+local function updateStatus(txt)
+    statusLbl.Text = "📌 Trạng thái: " .. txt
+end
+
+-- Helper tạo Toggle Button
+local function createToggle(text, y, key)
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, -24, 0, 36)
+    frame.Position = UDim2.new(0, 12, 0, y)
+    frame.BackgroundColor3 = Color3.fromRGB(28, 31, 40)
+    frame.Parent = main
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0.7, 0, 1, 0)
+    lbl.Position = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(230, 235, 245)
+    lbl.Font = Enum.Font.GothamMedium
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = frame
+    
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -20, 0, 32)
-    btn.Position = UDim2.new(0, 10, 0, y)
-    btn.BackgroundColor3 = Color3.fromRGB(30, 32, 42)
-    btn.Text = text .. ": OFF"
-    btn.TextColor3 = Color3.fromRGB(230, 230, 240)
-    btn.Font = Enum.Font.GothamMedium
-    btn.TextSize = 13
-    btn.Parent = main
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+    btn.Size = UDim2.new(0, 50, 0, 22)
+    btn.Position = UDim2.new(1, -60, 0.5, -11)
+    btn.BackgroundColor3 = Color3.fromRGB(45, 50, 65)
+    btn.Text = "OFF"
+    btn.TextColor3 = Color3.fromRGB(150, 160, 180)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 10
+    btn.Parent = frame
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
     
     btn.MouseButton1Click:Connect(function()
         S[key] = not S[key]
-        btn.Text = text .. ": " .. (S[key] and "ON" or "OFF")
-        btn.BackgroundColor3 = S[key] and Color3.fromRGB(0, 150, 210) or Color3.fromRGB(30, 32, 42)
+        if S[key] then
+            btn.Text = "ON"
+            btn.BackgroundColor3 = Color3.fromRGB(0, 200, 140)
+            btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        else
+            btn.Text = "OFF"
+            btn.BackgroundColor3 = Color3.fromRGB(45, 50, 65)
+            btn.TextColor3 = Color3.fromRGB(150, 160, 180)
+        end
     end)
 end
 
-makeToggle("Auto Slash (Chém Trứng)", 42, "AutoSlash")
-makeToggle("Auto Steal (Tự Bắt Pet)", 80, "AutoSteal")
-makeToggle("Bring Home (Vác về Base)", 118, "BringHome")
+createToggle("Tự Động Chém Trứng", 96, "AutoSlash")
+createToggle("Tự Động Bắt Pet", 138, "AutoSteal")
+createToggle("Tự Mang Pet Về Base", 180, "BringHome")
 
-local btnHome = Instance.new("TextButton")
-btnHome.Size = UDim2.new(1, -20, 0, 32)
-btnHome.Position = UDim2.new(0, 10, 0, 160)
-btnHome.BackgroundColor3 = Color3.fromRGB(35, 55, 40)
-btnHome.Text = "1. Set Home (Đứng ở BASE bấm)"
-btnHome.TextColor3 = Color3.fromRGB(170, 255, 170)
-btnHome.Font = Enum.Font.GothamMedium
-btnHome.TextSize = 12
-btnHome.Parent = main
-Instance.new("UICorner", btnHome).CornerRadius = UDim.new(0, 7)
+-- Helper tạo Action Button
+local function createActionButton(text, y, color, cb)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -24, 0, 36)
+    btn.Position = UDim2.new(0, 12, 0, y)
+    btn.BackgroundColor3 = color
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11
+    btn.Parent = main
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    
+    btn.MouseButton1Click:Connect(cb)
+    return btn
+end
 
-btnHome.MouseButton1Click:Connect(function()
+local btnSetHome = createActionButton("🏠 1. SET HOME (Đứng Base bấm)", 230, Color3.fromRGB(0, 120, 90), function()
     local root = getRoot()
     if root then
         savedHome = root.Position
-        btnHome.Text = "✓ Đã Lưu Vị Trí BASE!"
-        btnHome.BackgroundColor3 = Color3.fromRGB(0, 140, 70)
+        updateStatus("Đã lưu vị trí BASE!")
     end
 end)
 
-local btnEnd = Instance.new("TextButton")
-btnEnd.Size = UDim2.new(1, -20, 0, 32)
-btnEnd.Position = UDim2.new(0, 10, 0, 200)
-btnEnd.BackgroundColor3 = Color3.fromRGB(55, 40, 35)
-btnEnd.Text = "2. Set Map Cuối (Đứng MAP CUỐI bấm)"
-btnEnd.TextColor3 = Color3.fromRGB(255, 200, 160)
-btnEnd.Font = Enum.Font.GothamMedium
-btnEnd.TextSize = 12
-btnEnd.Parent = main
-Instance.new("UICorner", btnEnd).CornerRadius = UDim.new(0, 7)
-
-btnEnd.MouseButton1Click:Connect(function()
+local btnSetEnd = createActionButton("🗺️ 2. SET MAP CUỐI (Đứng Map Cuối bấm)", 274, Color3.fromRGB(180, 90, 20), function()
     local root = getRoot()
     if root then
         savedEndMap = root.Position
-        btnEnd.Text = "✓ Đã Lưu MAP CUỐI!"
-        btnEnd.BackgroundColor3 = Color3.fromRGB(160, 90, 40)
+        updateStatus("Đã lưu vị trí MAP CUỐI!")
     end
 end)
 
+createActionButton("🔄 Reset Vị Trí Lưu", 318, Color3.fromRGB(140, 40, 40), function()
+    savedHome = nil
+    savedEndMap = nil
+    updateStatus("Đã xóa vị trí Base & Map cuối!")
+end)
+
+-- Open/Close Floating Icon
 local icon = Instance.new("TextButton")
-icon.Size = UDim2.fromOffset(46, 46)
-icon.Position = UDim2.new(1, -58, 0, 70)
-icon.BackgroundColor3 = Color3.fromRGB(0, 170, 230)
-icon.Text = "K"
-icon.TextColor3 = Color3.new(1,1,1)
-icon.Font = Enum.Font.GothamBold
-icon.TextSize = 18
+icon.Size = UDim2.fromOffset(48, 48)
+icon.Position = UDim2.new(1, -65, 0.15, 0)
+icon.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
+icon.Text = "⚡"
+icon.TextSize = 22
 icon.Parent = gui
 Instance.new("UICorner", icon).CornerRadius = UDim.new(1, 0)
+
+local iconStroke = Instance.new("UIStroke", icon)
+iconStroke.Color = Color3.fromRGB(0, 230, 255)
+iconStroke.Thickness = 2
 
 icon.MouseButton1Click:Connect(function()
     main.Visible = not main.Visible
 end)
 
--- Drag UI
+-- Dragging Functionality
 local drag, sPos, sInput
 main.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
@@ -354,4 +354,61 @@ UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-print("[Kiet Hub V6] Ultimate Loaded!")
+-- MAIN LOOP LOGIC
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        
+        -- A. PHÁT HIỆN DANG CẦM PET -> QUAY VỀ BASE NGAY
+        if S.BringHome and savedHome and isCarryingPet() and not isReturning then
+            isReturning = true
+            updateStatus("Đã có Pet! Đang bay về Base...")
+            safeMoveTo(savedHome, S.ReturnSpeed)
+            task.wait(0.8)
+            updateStatus("Đã về Base an toàn!")
+            isReturning = false
+        end
+        
+        -- B. AUTO BẮT PET
+        if S.AutoSteal and not isReturning and not isCarryingPet() then
+            local pet = findPetObject()
+            if pet then
+                updateStatus("Phát hiện Pet! Đang di chuyển lại gần...")
+                local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
+                safeMoveTo(pos, S.Speed)
+                task.wait(0.1)
+                
+                updateStatus("Đang thực hiện cướp Pet...")
+                interactPet(pet)
+                task.wait(0.3)
+            else
+                updateStatus("Đang tìm Pet trên bản đồ...")
+            end
+        end
+        
+        -- C. AUTO SLASH TRỨNG
+        if S.AutoSlash and not isReturning and not isCarryingPet() then
+            if savedEndMap then
+                local root = getRoot()
+                if root and (root.Position - savedEndMap).Magnitude > 15 then
+                    updateStatus("Đang di chuyển tới Map Cuối...")
+                    safeMoveTo(savedEndMap, S.Speed)
+                end
+            end
+            
+            updateStatus("Đang chém Trứng...")
+            local char = lp.Character
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            if not tool then
+                local backpack = lp:FindFirstChild("Backpack")
+                if backpack then
+                    tool = backpack:FindFirstChildOfClass("Tool")
+                    if tool then tool.Parent = char end
+                end
+            end
+            if tool then pcall(function() tool:Activate() end) end
+        end
+    end
+end)
+
+print("[Kiet Hub V7 Redesign] Ready!")
