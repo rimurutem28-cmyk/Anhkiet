@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub V4 - Slash and Steal Pets (Anti-Rubberband & Auto Fix Base)
+    Kiet Hub V6 - Slash and Steal Pets (Auto Carry Detection & Multi-Interact)
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -16,14 +16,13 @@ local S = {
     AutoSlash = false,
     AutoSteal = false,
     BringHome = true,
-    Speed = 32,       -- Tốc độ chuẩn giúp bypass Anti-Cheat (không bị kéo lùi)
-    ReturnSpeed = 28, -- Tốc độ an toàn tuyệt đối khi vác Pet
-    ScanRange = 100,  -- Khoảng cách quét ProximityPrompt
+    Speed = 34,
+    ReturnSpeed = 28,
 }
 
 local savedHome = nil
 local savedEndMap = nil
-local isBusy = false
+local isReturning = false
 local noclipConnection = nil
 
 local function getRoot()
@@ -36,7 +35,7 @@ local function getRoot()
     return nil
 end
 
--- Bật Noclip để không bị dính map hoặc bị Anti-Cheat kéo lại khi vác Pet
+-- Tắt va chạm map khi di chuyển về base
 local function enableNoclip(state)
     if state then
         if not noclipConnection then
@@ -58,7 +57,6 @@ local function enableNoclip(state)
     end
 end
 
--- Tween di chuyển an toàn bypass Anti-cheat
 local function safeMoveTo(pos, speed)
     local root = getRoot()
     if not root or not pos then return end
@@ -72,7 +70,7 @@ local function safeMoveTo(pos, speed)
     local t = dist / spd
     
     local tw = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
-        CFrame = CFrame.new(pos + Vector3.new(0, 2, 0))
+        CFrame = CFrame.new(pos + Vector3.new(0, 2.5, 0))
     })
     
     tw:Play()
@@ -85,130 +83,160 @@ local function safeMoveTo(pos, speed)
     end
     
     enableNoclip(false)
-    task.wait(0.2) -- Dừng nghỉ để Server đồng bộ vị trí
+    task.wait(0.2)
 end
 
--- Tự động bấm nút ProximityPrompt chuẩn
-local function firePrompt(prompt)
-    if not prompt or not prompt:IsA("ProximityPrompt") then return end
-    pcall(function()
-        fireproximityprompt(prompt)
-    end)
+-- KIỂM TRA XEM NHÂN VẬT CÓ ĐANG CẦM/MANG PET KHÔNG
+local function isCarryingPet()
+    local char = lp.Character
+    if not char then return false end
+    
+    -- 1. Kiểm tra Tool đang cầm trên tay hoặc trong Backpack
+    for _, item in ipairs(char:GetChildren()) do
+        if item:IsA("Tool") and (item.Name:lower():find("pet") or item.Name:lower():find("egg") or item:GetAttribute("Pet")) then
+            return true
+        end
+    end
+    
+    -- 2. Kiểm tra Pet dính trên người (Model/Weld)
+    for _, child in ipairs(char:GetChildren()) do
+        if child:IsA("Model") or child:IsA("BasePart") then
+            local n = child.Name:lower()
+            if n:find("pet") or child:GetAttribute("Carrying") or child:GetAttribute("Pet") then
+                return true
+            end
+        end
+    end
+    
+    -- 3. Kiểm tra Attribute trạng thái
+    if char:GetAttribute("Carrying") or char:GetAttribute("HasPet") or lp:GetAttribute("Carrying") then
+        return true
+    end
+    
+    return false
 end
 
--- Tìm ProximityPrompt gần nhất trong phạm vi
-local function findNearestPrompt()
+-- TƯƠNG TÁC ĐA NĂNG (Gồm Prompt + Chạm Hitbox TouchInterest)
+local function interactPet(obj)
+    if not obj then return end
+    
+    -- 1. Kích hoạt ProximityPrompt
+    for _, prompt in ipairs(obj:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            pcall(function()
+                local oldHold = prompt.HoldDuration
+                prompt.HoldDuration = 0
+                fireproximityprompt(prompt)
+                prompt.HoldDuration = oldHold
+            end)
+        end
+    end
+    
+    -- 2. Chạm trực tiếp Hitbox (Dành cho game nhận TouchInterest)
     local root = getRoot()
-    if not root then return nil, nil end
+    if root then
+        for _, part in ipairs(obj:GetDescendants()) do
+            if part:IsA("BasePart") and part:FindFirstChildOfClass("TouchTransmitter") then
+                pcall(function()
+                    firetouchinterest(root, part, 0)
+                    task.wait(0.05)
+                    firetouchinterest(root, part, 1)
+                end)
+            end
+        end
+    end
+end
+
+-- TÌM PET GẦN NHẤT HOẶC TRÊN BẢN ĐỒ
+local function findPetObject()
+    local root = getRoot()
+    if not root then return nil end
     
-    local nearestPrompt = nil
-    local nearestObj = nil
-    local shortestDist = S.ScanRange
+    local bestObj = nil
+    local shortestDist = math.huge
     
-    for _, prompt in ipairs(workspace:GetDescendants()) do
-        if prompt:IsA("ProximityPrompt") and prompt.Enabled then
-            local parent = prompt.Parent
-            if parent then
-                local pos = parent:IsA("BasePart") and parent.Position or (parent:IsA("Model") and parent:GetPivot().Position)
-                if pos then
-                    local dist = (root.Position - pos).Magnitude
-                    if dist < shortestDist then
-                        shortestDist = dist
-                        nearestPrompt = prompt
-                        nearestObj = parent
-                    end
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("BasePart") then
+            local name = obj.Name:lower()
+            local hasPrompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
+            local hasTouch = obj:FindFirstChildWhichIsA("TouchTransmitter", true) ~= nil
+            
+            if (name:find("pet") or obj:GetAttribute("Pet") or hasPrompt or hasTouch) and not obj:IsDescendantOf(lp.Character) then
+                local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
+                local dist = (root.Position - pos).Magnitude
+                if dist < shortestDist then
+                    shortestDist = dist
+                    bestObj = obj
                 end
             end
         end
     end
-    
-    return nearestObj, nearestPrompt
+    return bestObj
 end
 
--- Tự equip kiếm/tool để chém
-local function autoEquipTool()
-    local char = lp.Character
-    if not char then return end
-    
-    local currentTool = char:FindFirstChildOfClass("Tool")
-    if not currentTool then
-        local backpack = lp:FindFirstChild("Backpack")
-        if backpack then
-            local tool = backpack:FindFirstChildOfClass("Tool")
-            if tool then
-                tool.Parent = char
-                currentTool = tool
-            end
-        end
-    end
-    
-    if currentTool then
-        pcall(function() currentTool:Activate() end)
-    end
-end
-
--- XỬ LÝ VÒNG LẶP CHÍNH
+-- VÒNG LẶP KIỂM TRA LẤY PET & VÀO BASE (LIÊN TỤC 0.1s)
 task.spawn(function()
     while true do
-        task.wait(0.25)
+        task.wait(0.1)
         
-        -- 1. ƯU TIÊN BẮT PET & MANG VỀ BASE
-        if S.AutoSteal and not isBusy then
-            local obj, prompt = findNearestPrompt()
-            
-            if prompt then
-                isBusy = true
-                local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
+        -- A. NẾU PHÁT HIỆN ĐANG MANG PET (TỰ BẮT HOẶC AUTO BẮT) -> CHẠY NGAY VỀ BASE
+        if S.BringHome and savedHome and isCarryingPet() and not isReturning then
+            isReturning = true
+            print("[Kiet Hub] Đã phát hiện Pet trên người! Đang quay về Base...")
+            safeMoveTo(savedHome, S.ReturnSpeed)
+            task.wait(0.8) -- Đợi Base nhận Pet
+            isReturning = false
+        end
+        
+        -- B. AUTO BẮT PET
+        if S.AutoSteal and not isReturning and not isCarryingPet() then
+            local pet = findPetObject()
+            if pet then
+                local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
                 
-                -- Di chuyển tới Pet
+                -- Bay lại gần Pet
                 safeMoveTo(pos, S.Speed)
                 task.wait(0.1)
                 
-                -- Bấm nút bắt Pet
-                firePrompt(prompt)
-                task.wait(0.4)
-                
-                -- Vác về Base nếu đã lưu vị trí Base
-                if S.BringHome and savedHome then
-                    safeMoveTo(savedHome, S.ReturnSpeed)
-                    task.wait(0.6) -- Chờ server xác nhận pet đã vào base
-                end
-                
-                isBusy = false
+                -- Thực hiện nhặt/bắt Pet
+                interactPet(pet)
+                task.wait(0.3)
             end
         end
         
-        -- 2. TỰ ĐỘNG CHÉM TRỨNG / CÀY MAP CUỐI
-        if S.AutoSlash and not isBusy then
-            -- Nếu có vị trí Map Cuối, tự bay tới Map Cuối
+        -- C. AUTO SLASH TRỨNG
+        if S.AutoSlash and not isReturning and not isCarryingPet() then
             if savedEndMap then
                 local root = getRoot()
                 if root and (root.Position - savedEndMap).Magnitude > 15 then
                     safeMoveTo(savedEndMap, S.Speed)
-                    task.wait(0.2)
                 end
             end
             
-            -- Đánh / Chém
-            autoEquipTool()
-            
-            local obj, prompt = findNearestPrompt()
-            if prompt then
-                firePrompt(prompt)
+            -- Tự dùng Tool chém
+            local char = lp.Character
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            if not tool then
+                local backpack = lp:FindFirstChild("Backpack")
+                if backpack then
+                    tool = backpack:FindFirstChildOfClass("Tool")
+                    if tool then tool.Parent = char end
+                end
             end
+            if tool then pcall(function() tool:Activate() end) end
         end
     end
 end)
 
--- GIAO DIỆN GUI
+-- GIAO DIỆN GUI KIET HUB V6
 local gui = Instance.new("ScreenGui")
-gui.Name = "KietSlashHub_V4"
+gui.Name = "KietSlashHub_V6"
 gui.ResetOnSpawn = false
 gui.Parent = lp:WaitForChild("PlayerGui")
 
 local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(290, 410)
-main.Position = UDim2.new(0, 10, 0.5, -205)
+main.Size = UDim2.fromOffset(290, 380)
+main.Position = UDim2.new(0, 10, 0.5, -190)
 main.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
 main.BorderSizePixel = 0
 main.Parent = gui
@@ -221,7 +249,7 @@ st.Thickness = 1.5
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 34)
 title.BackgroundTransparency = 1
-title.Text = "Kiet Hub V4 | Fixed Anti-Cheat"
+title.Text = "Kiet Hub V6 | Ultimate Auto Return"
 title.TextColor3 = Color3.fromRGB(0, 200, 255)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
@@ -247,10 +275,9 @@ local function makeToggle(text, y, key)
 end
 
 makeToggle("Auto Slash (Chém Trứng)", 42, "AutoSlash")
-makeToggle("Auto Steal (Bắt Pet)", 80, "AutoSteal")
+makeToggle("Auto Steal (Tự Bắt Pet)", 80, "AutoSteal")
 makeToggle("Bring Home (Vác về Base)", 118, "BringHome")
 
--- Nút Set Base
 local btnHome = Instance.new("TextButton")
 btnHome.Size = UDim2.new(1, -20, 0, 32)
 btnHome.Position = UDim2.new(0, 10, 0, 160)
@@ -271,7 +298,6 @@ btnHome.MouseButton1Click:Connect(function()
     end
 end)
 
--- Nút Set Map Cuối
 local btnEnd = Instance.new("TextButton")
 btnEnd.Size = UDim2.new(1, -20, 0, 32)
 btnEnd.Position = UDim2.new(0, 10, 0, 200)
@@ -292,28 +318,6 @@ btnEnd.MouseButton1Click:Connect(function()
     end
 end)
 
--- Nút Reset Tọa Độ
-local btnReset = Instance.new("TextButton")
-btnReset.Size = UDim2.new(1, -20, 0, 28)
-btnReset.Position = UDim2.new(0, 10, 0, 240)
-btnReset.BackgroundColor3 = Color3.fromRGB(60, 30, 30)
-btnReset.Text = "Reset Vị Trí Lưu (Làm lại từ đầu)"
-btnReset.TextColor3 = Color3.fromRGB(255, 150, 150)
-btnReset.Font = Enum.Font.Gotham
-btnReset.TextSize = 11
-btnReset.Parent = main
-Instance.new("UICorner", btnReset).CornerRadius = UDim.new(0, 7)
-
-btnReset.MouseButton1Click:Connect(function()
-    savedHome = nil
-    savedEndMap = nil
-    btnHome.Text = "1. Set Home (Đứng ở BASE bấm)"
-    btnHome.BackgroundColor3 = Color3.fromRGB(35, 55, 40)
-    btnEnd.Text = "2. Set Map Cuối (Đứng MAP CUỐI bấm)"
-    btnEnd.BackgroundColor3 = Color3.fromRGB(55, 40, 35)
-end)
-
--- Icon thu nhỏ GUI
 local icon = Instance.new("TextButton")
 icon.Size = UDim2.fromOffset(46, 46)
 icon.Position = UDim2.new(1, -58, 0, 70)
@@ -350,4 +354,4 @@ UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-print("[Kiet Hub V4] Success Ready!")
+print("[Kiet Hub V6] Ultimate Loaded!")
