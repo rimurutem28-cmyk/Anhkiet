@@ -1,6 +1,6 @@
 --[[
     Kiet Hub - Slash and Steal Pets
-    Fix: Về base sau khi bắt pet + tìm base tốt hơn
+    Fix: Bắt pet lại + cố gắng lên map cuối + về base chậm
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -17,11 +17,14 @@ local S = {
     AutoSlash = false,
     AutoSteal = false,
     MinIncome = 20000000,
-    SlashRange = 35,
-    StealRange = 50,
+    SlashRange = 80,      -- tăng tầm tìm trứng
+    StealRange = 70,
     BringHome = true,
-    Speed = 100,
+    Speed = 65,           -- tốc độ di chuyển
+    ReturnSpeed = 50,     -- về base chậm hơn
 }
+
+local savedHome = nil
 
 local function getRoot()
     local char = lp.Character
@@ -37,10 +40,10 @@ local function tweenTo(pos, speed)
     local root = getRoot()
     if not root or not pos then return end
     local dist = (root.Position - pos).Magnitude
-    if dist < 5 then return end
-    local t = math.clamp(dist / (speed or S.Speed), 0.2, 4)
+    if dist < 6 then return end
+    local t = math.clamp(dist / (speed or S.Speed), 0.3, 5)
     local tw = TweenService:Create(root, TweenInfo.new(t, Enum.EasingStyle.Linear), {
-        CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
+        CFrame = CFrame.new(pos + Vector3.new(0, 3.5, 0))
     })
     tw:Play()
     tw.Completed:Wait()
@@ -50,66 +53,25 @@ local function spamClick(n)
     for i = 1, (n or 8) do
         pcall(function()
             VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-            task.wait(0.035)
+            task.wait(0.03)
             VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
         end)
-        task.wait(0.06)
+        task.wait(0.05)
     end
 end
 
 local function firePrompts(obj)
     if not obj then return end
-    for _, v in ipairs(obj:GetDescendants()) do
-        if v:IsA("ProximityPrompt") then
-            pcall(fireproximityprompt, v)
-        end
-    end
-end
-
--- ==================== TÌM BASE ====================
-local savedHome = nil
-
-local function findHome()
-    if savedHome then return savedHome end
-
-    local candidates = {}
-
-    -- Cách 1: Tìm theo Owner
-    for _, folderName in ipairs({"Plots", "Bases", "PlayerPlots", "Farms", "Homes", "Tycoons", "PlayerBases"}) do
-        local folder = workspace:FindFirstChild(folderName)
-        if folder then
-            for _, p in ipairs(folder:GetChildren()) do
-                local owner = p:GetAttribute("Owner") or p:GetAttribute("OwnerId") or p:GetAttribute("Player")
-                if owner == lp.UserId or owner == lp.Name or p.Name == tostring(lp.UserId) or p.Name == lp.Name then
-                    local pos = p:IsA("Model") and p:GetPivot().Position or (p:IsA("BasePart") and p.Position)
-                    if pos then
-                        savedHome = pos
-                        return pos
-                    end
-                end
+    pcall(function()
+        for _, v in ipairs(obj:GetDescendants()) do
+            if v:IsA("ProximityPrompt") then
+                fireproximityprompt(v)
             end
         end
-    end
-
-    -- Cách 2: Tìm SpawnLocation gần nhất của mình
-    for _, sp in ipairs(workspace:GetDescendants()) do
-        if sp:IsA("SpawnLocation") then
-            local pos = sp.Position
-            table.insert(candidates, pos)
-        end
-    end
-
-    -- Cách 3: Dùng vị trí hiện tại làm home tạm (lần đầu)
-    local root = getRoot()
-    if root then
-        savedHome = root.Position
-        return savedHome
-    end
-
-    return Vector3.new(0, 10, 0)
+    end)
 end
 
--- Nút "Set Home" để người chơi đứng ở base rồi lưu
+-- ==================== HOME ====================
 local function setHomeHere()
     local root = getRoot()
     if root then
@@ -119,24 +81,36 @@ local function setHomeHere()
     return false
 end
 
--- ==================== EGG ====================
-local function findNearestEgg()
+local function getHome()
+    if savedHome then return savedHome end
+    local root = getRoot()
+    return root and root.Position or Vector3.new(0, 10, 0)
+end
+
+-- ==================== EGG (ưu tiên xa hơn = map cuối) ====================
+local function findBestEgg()
     local root = getRoot()
     if not root then return nil end
-    local nearest, minD = nil, S.SlashRange
+
+    local best, bestScore = nil, -1
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("Model") or obj:IsA("BasePart") then
             local name = obj.Name:lower()
             if name:find("egg") or obj:GetAttribute("Egg") or obj:HasTag("Egg") then
                 local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
-                local d = (root.Position - pos).Magnitude
-                if d < minD then
-                    nearest, minD = obj, d
+                local dist = (root.Position - pos).Magnitude
+                if dist < S.SlashRange then
+                    -- Ưu tiên trứng xa hơn (thường là map cuối)
+                    local score = dist
+                    if score > bestScore then
+                        bestScore = score
+                        best = obj
+                    end
                 end
             end
         end
     end
-    return nearest
+    return best
 end
 
 -- ==================== PET ====================
@@ -153,7 +127,7 @@ local function parseIncome(text)
 end
 
 local function getIncome(obj)
-    for _, a in ipairs({"Income", "MoneyPerSecond", "Value", "MPS", "Earnings", "Gen", "Money", "CashPerSec"}) do
+    for _, a in ipairs({"Income","MoneyPerSecond","Value","MPS","Earnings","Gen","Money","CashPerSec"}) do
         local v = obj:GetAttribute(a)
         if type(v) == "number" and v > 0 then return v end
         if type(v) == "string" then
@@ -164,7 +138,7 @@ local function getIncome(obj)
     for _, d in ipairs(obj:GetDescendants()) do
         if d:IsA("TextLabel") or d:IsA("TextButton") then
             local n = parseIncome(d.Text)
-            if n >= S.MinIncome then return n end
+            if n >= 1000 then return n end
         end
     end
     return 0
@@ -173,38 +147,46 @@ end
 local function findBestPet()
     local root = getRoot()
     if not root then return nil end
-    local best, bestInc, bestD = nil, S.MinIncome - 1, S.StealRange
+
+    local best, bestInc, bestD = nil, 0, S.StealRange
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("Model") or obj:IsA("BasePart") then
             local name = obj.Name:lower()
-            if name:find("pet") or obj:GetAttribute("Pet") or obj:HasTag("Pet") or getIncome(obj) > 0 then
-                local inc = getIncome(obj)
-                if inc >= S.MinIncome then
-                    local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
-                    local d = (root.Position - pos).Magnitude
-                    if d < bestD or (inc > bestInc and d < S.StealRange * 2) then
-                        best, bestInc, bestD = obj, inc, d
-                    end
+            local inc = getIncome(obj)
+            if (name:find("pet") or obj:GetAttribute("Pet") or obj:HasTag("Pet") or inc > 0) and inc >= S.MinIncome then
+                local pos = obj:IsA("Model") and obj:GetPivot().Position or obj.Position
+                local d = (root.Position - pos).Magnitude
+                if d < bestD or (inc > bestInc and d < S.StealRange * 2.5) then
+                    best = obj
+                    bestInc = inc
+                    bestD = d
                 end
             end
         end
     end
-    return best, bestInc
+    return best
 end
 
 -- ==================== LOOPS ====================
 local function autoSlashLoop()
     while S.AutoSlash do
-        local egg = findNearestEgg()
+        local egg = findBestEgg()
         if egg then
             local pos = egg:IsA("Model") and egg:GetPivot().Position or egg.Position
             tweenTo(pos, S.Speed)
-            spamClick(12)
+            spamClick(14)
             firePrompts(egg)
             local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
             if tool then pcall(function() tool:Activate() end) end
+        else
+            -- Không thấy trứng gần → thử đi thẳng về phía trước (map cuối)
+            local root = getRoot()
+            if root then
+                local forward = root.CFrame.LookVector * 40
+                tweenTo(root.Position + forward, S.Speed)
+            end
         end
-        task.wait(0.3)
+        task.wait(0.25)
     end
 end
 
@@ -213,29 +195,27 @@ local function autoStealLoop()
         local pet = findBestPet()
         if pet then
             local pos = pet:IsA("Model") and pet:GetPivot().Position or pet.Position
-            tweenTo(pos, S.Speed + 15)
+            tweenTo(pos, S.Speed + 10)
+            task.wait(0.15)
             firePrompts(pet)
-            spamClick(5)
+            spamClick(6)
 
-            -- Thử bắt
             local prompt = pet:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt then pcall(fireproximityprompt, prompt) end
+            if prompt then
+                pcall(fireproximityprompt, prompt)
+            end
 
-            task.wait(0.35)
+            task.wait(0.4)
 
-            -- ===== VỀ BASE NGAY =====
+            -- Về base chậm
             if S.BringHome then
-                local home = findHome()
-                if home then
-                    -- Bay về mạnh
-                    tweenTo(home, S.Speed + 30)
-                    task.wait(0.2)
-                    -- Thử đặt pet
-                    firePrompts(workspace)
-                end
+                local home = getHome()
+                tweenTo(home, S.ReturnSpeed)
+                task.wait(0.3)
+                firePrompts(workspace)
             end
         end
-        task.wait(0.45)
+        task.wait(0.4)
     end
 end
 
@@ -246,15 +226,15 @@ gui.ResetOnSpawn = false
 gui.Parent = lp:WaitForChild("PlayerGui")
 
 local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(280, 340)
-main.Position = UDim2.new(0, 12, 0.5, -170)
+main.Size = UDim2.fromOffset(280, 350)
+main.Position = UDim2.new(0, 12, 0.5, -175)
 main.BackgroundColor3 = Color3.fromRGB(16, 17, 22)
 main.BorderSizePixel = 0
 main.Parent = gui
 Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
-
-Instance.new("UIStroke", main).Color = Color3.fromRGB(0, 190, 255)
-Instance.new("UIStroke", main).Thickness = 1.5
+local st = Instance.new("UIStroke", main)
+st.Color = Color3.fromRGB(0, 190, 255)
+st.Thickness = 1.5
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 36)
@@ -276,7 +256,6 @@ local function makeToggle(text, y, key, cb)
     btn.TextSize = 13
     btn.Parent = main
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
-
     btn.MouseButton1Click:Connect(function()
         S[key] = not S[key]
         btn.Text = text .. ": " .. (S[key] and "ON" or "OFF")
@@ -289,7 +268,6 @@ makeToggle("Auto Slash Egg", 48, "AutoSlash", autoSlashLoop)
 makeToggle("Auto Steal Pet", 90, "AutoSteal", autoStealLoop)
 makeToggle("Bring Home", 132, "BringHome")
 
--- Nút Set Home
 local setHomeBtn = Instance.new("TextButton")
 setHomeBtn.Size = UDim2.new(1, -24, 0, 34)
 setHomeBtn.Position = UDim2.new(0, 12, 0, 174)
@@ -300,7 +278,6 @@ setHomeBtn.Font = Enum.Font.GothamMedium
 setHomeBtn.TextSize = 12
 setHomeBtn.Parent = main
 Instance.new("UICorner", setHomeBtn).CornerRadius = UDim.new(0, 8)
-
 setHomeBtn.MouseButton1Click:Connect(function()
     if setHomeHere() then
         setHomeBtn.Text = "Home Saved!"
@@ -313,10 +290,10 @@ setHomeBtn.MouseButton1Click:Connect(function()
 end)
 
 local info = Instance.new("TextLabel")
-info.Size = UDim2.new(1, -24, 0, 70)
+info.Size = UDim2.new(1, -24, 0, 80)
 info.Position = UDim2.new(0, 12, 0, 220)
 info.BackgroundTransparency = 1
-info.Text = "1. Vào base → bấm Set Home\n2. Bật Auto Steal\n3. Icon K để ẩn/hiện UI"
+info.Text = "1. Vào base → Set Home\n2. Bật Auto Slash / Steal\n3. Icon K ẩn/hiện UI\nVề base chậm hơn"
 info.TextColor3 = Color3.fromRGB(140, 150, 170)
 info.Font = Enum.Font.Gotham
 info.TextSize = 12
@@ -324,18 +301,17 @@ info.TextWrapped = true
 info.TextYAlignment = Enum.TextYAlignment.Top
 info.Parent = main
 
--- Icon toggle
+-- Icon
 local icon = Instance.new("TextButton")
 icon.Size = UDim2.fromOffset(46, 46)
 icon.Position = UDim2.new(1, -58, 0, 70)
 icon.BackgroundColor3 = Color3.fromRGB(0, 170, 230)
 icon.Text = "K"
-icon.TextColor3 = Color3.new(1, 1, 1)
+icon.TextColor3 = Color3.new(1,1,1)
 icon.Font = Enum.Font.GothamBold
 icon.TextSize = 18
 icon.Parent = gui
 Instance.new("UICorner", icon).CornerRadius = UDim.new(1, 0)
-
 icon.MouseButton1Click:Connect(function()
     main.Visible = not main.Visible
 end)
@@ -361,4 +337,4 @@ UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-print("[Kiet Hub] Fixed - Set Home trước khi dùng Auto Steal")
+print("[Kiet Hub] Fixed - Pet catch + go further + slow return")
