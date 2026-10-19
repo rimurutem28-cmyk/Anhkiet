@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub v13 - Slash and Steal Pets (Take pet từ WorldPet)
+    Kiet Hub v14 - Slash and Steal Pets (Take pet từ WorldPet)
     - UI mới: 3 tab (Farm / Setup / Log), có log trạng thái
     - Steal: kiểm tra có nhận được pet (tool mới trong Backpack) hay chưa
     - Place: đặt pet về base (thử prompt có chữ place/đặt trong base của bạn)
@@ -31,6 +31,7 @@ local S = {
     BringHome = true,
     Path = "vertical", -- vertical = dọc (Z trước) | horizontal = ngang (X trước) | straight = thẳng
     MinIncome = 20e6,
+    EggKeyword = "", -- ưu tiên egg có tên/design chứa từ khoá này (vd: halloween)
     MinEggHP = 0, -- chỉ chém egg có máu >= giá trị này (0 = chém hết)
     Speed = 55,
     ReturnSpeed = 100,
@@ -43,12 +44,13 @@ local savedHome, savedEndMap, startPos
 local looping = false
 local curTween = nil
 local tried = {}
+local badEgg = {} -- egg không tới được, bỏ qua tạm
 local conns = {}
 local stats = { eggs = 0, pets = 0 }
 local carry = { active = false, lost = false, reason = nil, uid = nil }
 local moving = { tele = false, untilT = 0 }
 local resetInfo = { at = 0 }
-local VERSION = "v13"
+local VERSION = "v14"
 
 env.KietHubStop = function()
     alive = false
@@ -184,7 +186,8 @@ local function walkTo(pos)
         end
         leg(pos, 15)
     else
-        leg(pos, 90) -- không tìm được đường: đi thẳng về phía đích
+        log("Không tìm được đường tới đích (có thể khác map / cần portal), thử đi thẳng")
+        leg(pos, 20)
     end
 end
 
@@ -629,28 +632,70 @@ local function equipWeapon()
     return nil
 end
 
+local eventCache = { t = 0, list = {} }
+
+local function eggCandidates()
+    local seen, list = {}, {}
+    local function add(m)
+        if m and not seen[m] and (m:IsA("Model") or m:IsA("BasePart"))
+            and type(m:GetAttribute("SAE_EggHP")) == "number" then
+            seen[m] = true
+            list[#list + 1] = m
+        end
+    end
+    for _, m in ipairs(CollectionService:GetTagged("SAE_WorldEgg")) do add(m) end
+    local world = workspace:FindFirstChild("SAE_World")
+    if world then
+        for _, m in ipairs(world:GetChildren()) do add(m) end
+    end
+    -- khu sự kiện: quét lại mỗi 5s cho nhẹ
+    local hz = workspace:FindFirstChild("HalloweenZone")
+    if hz then
+        if os.clock() - eventCache.t > 5 then
+            eventCache.t = os.clock()
+            eventCache.list = {}
+            for _, m in ipairs(hz:GetDescendants()) do
+                if (m:IsA("Model") or m:IsA("BasePart")) and type(m:GetAttribute("SAE_EggHP")) == "number" then
+                    eventCache.list[#eventCache.list + 1] = m
+                end
+            end
+        end
+        for _, m in ipairs(eventCache.list) do add(m) end
+    end
+    return list
+end
+
 local function findEgg()
     local root = getRoot()
     if not root then return nil end
+    local kw = S.EggKeyword:lower()
+    local now = os.clock()
+    local bestKey, bestKeyD = nil, math.huge
     local bestNear, bestNearD = nil, math.huge
     local bestEnd, bestEndD = nil, math.huge
-    for _, egg in ipairs(CollectionService:GetTagged("SAE_WorldEgg")) do
+    for _, egg in ipairs(eggCandidates()) do
         local hp = egg:GetAttribute("SAE_EggHP")
-        if type(hp) == "number" and hp > 0 and egg:IsDescendantOf(workspace) then
+        if hp > 0 and egg:IsDescendantOf(workspace) and not (badEgg[egg] and now - badEgg[egg] < 60) then
             local maxhp = egg:GetAttribute("SAE_EggMaxHP")
             local size = math.max(hp, type(maxhp) == "number" and maxhp or 0)
             local pos = getPos(egg)
             if pos and size >= S.MinEggHP then
                 local d = (root.Position - pos).Magnitude
                 if d < bestNearD then bestNear, bestNearD = egg, d end
-                -- ưu tiên egg ở khu Map Cuối (bán kính 150 quanh điểm đã Set)
                 if savedEndMap and (pos - savedEndMap).Magnitude <= 150 and d < bestEndD then
                     bestEnd, bestEndD = egg, d
+                end
+                if kw ~= "" then
+                    local text = (tostring(egg:GetAttribute("SAE_EggName") or "") .. " "
+                        .. tostring(egg:GetAttribute("Design") or "") .. " "
+                        .. tostring(egg:GetAttribute("SourceName") or "") .. " "
+                        .. egg:GetFullName()):lower()
+                    if text:find(kw, 1, true) and d < bestKeyD then bestKey, bestKeyD = egg, d end
                 end
             end
         end
     end
-    return bestEnd or bestNear
+    return bestKey or bestEnd or bestNear
 end
 
 local function slashOnce()
@@ -671,6 +716,15 @@ local function slashOnce()
     end
     setStatus("Đang chém egg")
     tweenTo(getPos(egg), S.Speed)
+    do
+        local r, ep = getRoot(), getPos(egg)
+        if r and ep and S.AutoSlash and os.clock() - resetInfo.at > 5
+            and (flat(r.Position) - flat(ep)).Magnitude > 25 then
+            badEgg[egg] = os.clock()
+            log("Không tới được egg (có thể khác map), bỏ qua 60s: " .. tostring(egg:GetAttribute("SAE_EggName") or egg.Name))
+            return
+        end
+    end
     local n = 0
     while alive and S.AutoSlash and n < 40 and getRoot()
         and egg:IsDescendantOf(workspace)
@@ -787,6 +841,43 @@ local function dumpInfo()
     local text = table.concat(out, "\n")
     local ok = copyText(text)
     log(ok and ("Đã copy dump (" .. #out .. " dòng) vào clipboard") or "Không có clipboard, đã in ra console (F9)")
+end
+
+local function dumpEggs()
+    local out = {}
+    local function add(x) out[#out + 1] = x end
+    add("== EGG (có SAE_EggHP / SAE_EggUid) ==")
+    local n = 0
+    for _, m in ipairs(workspace:GetDescendants()) do
+        if (m:IsA("Model") or m:IsA("BasePart"))
+            and (m:GetAttribute("SAE_EggHP") ~= nil or m:GetAttribute("SAE_EggUid") ~= nil) then
+            n += 1
+            if n <= 80 then
+                add(("%s | tag=%s | name=%s design=%s src=%s hp=%s/%s state=%s pos=%s"):format(
+                    m:GetFullName(), tostring(CollectionService:HasTag(m, "SAE_WorldEgg")),
+                    tostring(m:GetAttribute("SAE_EggName")), tostring(m:GetAttribute("Design")),
+                    tostring(m:GetAttribute("SourceName")), tostring(m:GetAttribute("SAE_EggHP")),
+                    tostring(m:GetAttribute("SAE_EggMaxHP")), tostring(m:GetAttribute("SAE_HatchState")),
+                    tostring(getPos(m))))
+            end
+        end
+    end
+    add("tổng: " .. n)
+    add("== HALLOWEEN ==")
+    for _, name in ipairs({ "HalloweenZone", "HalloweenDecor" }) do
+        local f = workspace:FindFirstChild(name)
+        local bp = f and f:FindFirstChildWhichIsA("BasePart", true)
+        add(name .. ": " .. (f and (f:GetFullName() .. " | con=" .. #f:GetChildren() .. " | pos=" .. tostring(bp and bp.Position)) or "không có"))
+    end
+    add("== PORTAL ==")
+    for _, tag in ipairs({ "SAE_HopPortal", "SAE_PlaceHopPrompt" }) do
+        for _, m in ipairs(CollectionService:GetTagged(tag)) do
+            add(tag .. " | " .. m:GetFullName() .. " | " .. m.ClassName .. " | " .. attrs(m) .. " | pos=" .. tostring(getPos(m)))
+            if m:IsA("ProximityPrompt") then add("   " .. describePrompt(m)) end
+        end
+    end
+    local ok = copyText(table.concat(out, "\n"))
+    log(ok and ("Đã copy dump egg (" .. #out .. " dòng)") or "Không có clipboard, đã in ra console (F9)")
 end
 
 local rec = { on = false, lines = {} }
@@ -1112,6 +1203,35 @@ local function parseM(t)
     return v > 0 and v / 1e6 or nil
 end
 
+local function textRow(parent, text, getter, setter)
+    local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = C.panel }, parent)
+    corner(row, 10)
+    mk("TextLabel", {
+        Size = UDim2.new(1, -110, 1, 0),
+        Position = UDim2.fromOffset(12, 0),
+        BackgroundTransparency = 1,
+        Text = text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 13,
+    }, row)
+    local box = mk("TextBox", {
+        Size = UDim2.fromOffset(84, 28),
+        Position = UDim2.new(1, -94, 0.5, -14),
+        BackgroundColor3 = C.panel2,
+        Text = getter(),
+        PlaceholderText = "vd: halloween",
+        PlaceholderColor3 = C.sub,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 12,
+        ClearTextOnFocus = false,
+    }, row)
+    corner(box, 8)
+    box.FocusLost:Connect(function() setter(box.Text) end)
+end
+
 -- Trang Farm
 local farm = listPage("Farm")
 switchRow(farm, "Auto Slash Egg", "AutoSlash", refresh)
@@ -1121,6 +1241,8 @@ inputRow(farm, "Chỉ lấy pet từ (M/s)", function() return S.MinIncome / 1e6
     function(v) S.MinIncome = v * 1e6 end, parseM)
 inputRow(farm, "Chỉ chém egg từ (M máu)", function() return S.MinEggHP / 1e6 end,
     function(v) S.MinEggHP = v * 1e6 end, parseM)
+textRow(farm, "Ưu tiên egg (từ khoá)", function() return S.EggKeyword end,
+    function(t) S.EggKeyword = (tostring(t):gsub("^%s+", ""):gsub("%s+$", "")) end)
 
 local statusBox = mk("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.panel }, farm)
 corner(statusBox, 10)
@@ -1147,9 +1269,9 @@ statsLabel = mk("TextLabel", {
 updateStats()
 
 mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 140),
+    Size = UDim2.new(1, 0, 0, 165),
     BackgroundTransparency = 1,
-    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg (ưu tiên khu Map Cuối nếu đã Set, chỉ egg đủ máu)\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nMap reset: tự phát hiện, chạy lại map cuối\nVào base: tự bấm Trang bị",
+    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg (ưu tiên khu Map Cuối nếu đã Set, chỉ egg đủ máu)\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nMap reset: tự phát hiện, chạy lại map cuối\nEgg sự kiện: gõ từ khoá tên egg vào ô Ưu tiên (vd halloween)\nVào base: tự bấm Trang bị",
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top,
@@ -1196,6 +1318,10 @@ local PATH_NEXT = { vertical = "horizontal", horizontal = "straight", straight =
 actionButton(setup, "Hướng chạy về: " .. PATH_LABEL[S.Path], C.panel2, function(b)
     S.Path = PATH_NEXT[S.Path]
     b.Text = "Hướng chạy về: " .. PATH_LABEL[S.Path]
+end)
+actionButton(setup, "Dump Egg (lấy info egg Halloween)", C.panel2, function()
+    dumpEggs()
+    return "Đã copy ✓"
 end)
 actionButton(setup, "Dump Info (đứng ở base rồi bấm)", C.panel2, function()
     dumpInfo()
@@ -1306,5 +1432,5 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v13 sẵn sàng")
-print("[Kiet Hub] v13 loaded")
+log("Kiet Hub v14 sẵn sàng")
+print("[Kiet Hub] v14 loaded")
