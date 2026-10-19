@@ -1,5 +1,5 @@
 --[[
-    Kiet Hub v12 - Slash and Steal Pets (Take pet từ WorldPet)
+    Kiet Hub v13 - Slash and Steal Pets (Take pet từ WorldPet)
     - UI mới: 3 tab (Farm / Setup / Log), có log trạng thái
     - Steal: kiểm tra có nhận được pet (tool mới trong Backpack) hay chưa
     - Place: đặt pet về base (thử prompt có chữ place/đặt trong base của bạn)
@@ -14,6 +14,7 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
 local HttpService = game:GetService("HttpService")
+local PathfindingService = game:GetService("PathfindingService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local lp = Players.LocalPlayer
@@ -33,7 +34,7 @@ local S = {
     MinEggHP = 0, -- chỉ chém egg có máu >= giá trị này (0 = chém hết)
     Speed = 55,
     ReturnSpeed = 100,
-    ReturnMode = "tele", -- tele = nhảy theo bước | tween = chạy mượt
+    Move = "walk",       -- walk = đi bộ thường | tween | tele (chỉ lúc chạy về)
     TeleStep = 150,      -- stud mỗi lần nhảy khi tele
 }
 
@@ -46,7 +47,8 @@ local conns = {}
 local stats = { eggs = 0, pets = 0 }
 local carry = { active = false, lost = false, reason = nil, uid = nil }
 local moving = { tele = false, untilT = 0 }
-local VERSION = "v12"
+local resetInfo = { at = 0 }
+local VERSION = "v13"
 
 env.KietHubStop = function()
     alive = false
@@ -139,10 +141,61 @@ local function tweenDirect(pos, speed)
     if curTween == tw then curTween = nil end
 end
 
+local function flat(v) return Vector3.new(v.X, 0, v.Z) end
+
+-- Đi bộ thật bằng Humanoid:MoveTo + tìm đường (không đổi tốc độ, không tween/tele)
+local function walkTo(pos)
+    local root = getRoot()
+    local hum = root and root.Parent and root.Parent:FindFirstChildOfClass("Humanoid")
+    if not root or not hum or not pos or not alive then return end
+    local startReset = resetInfo.at
+
+    local function aborted()
+        return not alive or getRoot() ~= root or resetInfo.at ~= startReset
+            or not (S.AutoSlash or S.AutoSteal) or (carry.active and carry.lost)
+    end
+
+    -- đi tới 1 điểm; kẹt thì nhảy, MoveTo tự hết hạn sau 8s nên gọi lại định kỳ
+    local function leg(p, timeout)
+        local t0 = os.clock()
+        local lastCheck, lastPos = t0, root.Position
+        hum:MoveTo(p)
+        while not aborted() and (flat(root.Position) - flat(p)).Magnitude > 5 and os.clock() - t0 < timeout do
+            task.wait(0.1)
+            local now = os.clock()
+            if now - lastCheck > 1.5 then
+                if (root.Position - lastPos).Magnitude < 2 then hum.Jump = true end
+                lastPos, lastCheck = root.Position, now
+                hum:MoveTo(p)
+            end
+        end
+        return not aborted()
+    end
+
+    if (flat(root.Position) - flat(pos)).Magnitude <= 6 then return end
+
+    local path = PathfindingService:CreatePath({ AgentRadius = 3, AgentHeight = 5, AgentCanJump = true })
+    local ok = pcall(function() path:ComputeAsync(root.Position, pos) end)
+    if ok and path.Status == Enum.PathStatus.Success then
+        for _, wp in ipairs(path:GetWaypoints()) do
+            if aborted() then return end
+            if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+            if not leg(wp.Position, 6) then return end
+        end
+        leg(pos, 15)
+    else
+        leg(pos, 90) -- không tìm được đường: đi thẳng về phía đích
+    end
+end
+
 -- mode: "vertical" (dọc, Z trước rồi X) | "horizontal" (ngang, X trước rồi Z) | "straight"/nil (đi thẳng)
 local function tweenTo(pos, speed, mode)
     local root = getRoot()
     if not root or not pos or not alive then return end
+    if S.Move == "walk" then
+        walkTo(pos)
+        return
+    end
     if mode == "vertical" or mode == "horizontal" then
         local cur = root.Position
         local wp
@@ -302,8 +355,6 @@ local function markLost(reason)
         if curTween then curTween:Cancel() end
     end
 end
-
-local resetInfo = { at = 0 }
 
 -- Map reset / bị ép về điểm xuất phát: huỷ tween, bỏ pet đang mang, chờ tải lại rồi chạy lại từ đầu
 local function onMapReset(reason)
@@ -493,7 +544,7 @@ local function afterTake(ok, tool, before, uid)
     local home = savedHome or startPos
     if home then
         setStatus("Chạy về điểm nhận pet")
-        if S.ReturnMode == "tele" then
+        if S.Move == "tele" then
             teleportTo(home)
         else
             tweenTo(home, S.ReturnSpeed, S.Path)
@@ -1134,10 +1185,11 @@ actionButton(setup, "Set Map Cuối (đứng map cuối)", C.warn, function()
         return "Đã lưu Map Cuối ✓"
     end
 end)
-local MODE_LABEL = { tele = "Tele (nhảy theo bước)", tween = "Tween (chạy mượt)" }
-actionButton(setup, "Kiểu chạy về: " .. MODE_LABEL[S.ReturnMode], C.warn, function(b)
-    S.ReturnMode = (S.ReturnMode == "tele") and "tween" or "tele"
-    b.Text = "Kiểu chạy về: " .. MODE_LABEL[S.ReturnMode]
+local MOVE_LABEL = { walk = "Đi bộ (như bấm di chuyển)", tween = "Tween", tele = "Tele (chỉ lúc về)" }
+local MOVE_NEXT = { walk = "tween", tween = "tele", tele = "walk" }
+actionButton(setup, "Di chuyển: " .. MOVE_LABEL[S.Move], C.warn, function(b)
+    S.Move = MOVE_NEXT[S.Move]
+    b.Text = "Di chuyển: " .. MOVE_LABEL[S.Move]
 end)
 local PATH_LABEL = { vertical = "Dọc (Z trước)", horizontal = "Ngang (X trước)", straight = "Thẳng" }
 local PATH_NEXT = { vertical = "horizontal", horizontal = "straight", straight = "vertical" }
@@ -1254,5 +1306,5 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v12 sẵn sàng")
-print("[Kiet Hub] v12 loaded")
+log("Kiet Hub v13 sẵn sàng")
+print("[Kiet Hub] v13 loaded")
