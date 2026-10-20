@@ -237,8 +237,7 @@ end
 
 local lastPathLog = 0
 
--- Đi bộ thật bằng Humanoid:MoveTo. Đường xa (hàng nghìn stud) thì Pathfinding không tính nổi,
--- nên chia thành các đoạn ~120 stud, mỗi đoạn tìm đường cục bộ; kẹt thì né sang bên rồi đi tiếp.
+-- Đi thẳng tới đích: MoveTo liên tục về điểm cuối, không chia đoạn 120 stud
 local function walkTo(pos)
     local root = getRoot()
     local hum = root and root.Parent and root.Parent:FindFirstChildOfClass("Humanoid")
@@ -251,74 +250,35 @@ local function walkTo(pos)
             or (hooks.interrupt ~= nil and hooks.interrupt())
     end
 
-    -- đi tới 1 điểm; kẹt thì nhảy, MoveTo tự hết hạn sau 8s nên gọi lại định kỳ
-    local function leg(p, timeout)
-        local t0 = os.clock()
-        local lastCheck, lastPos = t0, root.Position
-        hum:MoveTo(p)
-        while not aborted() and (flat(root.Position) - flat(p)).Magnitude > 5 and os.clock() - t0 < timeout do
-            task.wait(0.1)
-            local now = os.clock()
-            if now - lastCheck > 1.5 then
-                if (root.Position - lastPos).Magnitude < 2 then hum.Jump = true end
-                lastPos, lastCheck = root.Position, now
-                hum:MoveTo(p)
-            end
-        end
-        return not aborted()
-    end
-
-    -- 1 đoạn ngắn: tìm đường cục bộ, không có thì đi thẳng
-    local function hop(goal)
-        local path = PathfindingService:CreatePath({ AgentRadius = 2, AgentHeight = 5, AgentCanJump = true })
-        local ok = pcall(function() path:ComputeAsync(root.Position, goal) end)
-        if ok and path.Status == Enum.PathStatus.Success then
-            for _, wp in ipairs(path:GetWaypoints()) do
-                if aborted() then return end
-                if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
-                leg(wp.Position, 5)
-            end
-        else
-            if os.clock() - lastPathLog > 30 then
-                lastPathLog = os.clock()
-                log("Không tìm được đường cục bộ, đi thẳng từng đoạn")
-            end
-            local t = (flat(root.Position) - flat(goal)).Magnitude / math.max(hum.WalkSpeed, 8) * 1.5 + 3
-            leg(goal, t)
-        end
-    end
-
     local walkSpeed = math.max(hum.WalkSpeed, 8)
     local deadline = os.clock() + math.max(60, (flat(root.Position) - flat(pos)).Magnitude / walkSpeed * 2 + 30)
-    local stuck, side = 0, 1
+    local lastCheck, lastPos = os.clock(), root.Position
+    local stuck = 0
+
+    hum:MoveTo(pos)
+
     while not aborted() and os.clock() < deadline do
         local cur = root.Position
-        local to = flat(pos) - flat(cur)
-        local dist = to.Magnitude
+        local dist = (flat(cur) - flat(pos)).Magnitude
         if dist <= 6 then break end
-        local dir = to.Unit
-        local goal = cur + dir * math.min(dist, 120)
-        goal = Vector3.new(goal.X, dist <= 120 and pos.Y or groundAt(goal, cur.Y), goal.Z)
-        hop(goal)
-        if aborted() then return end
-        local moved = dist - (flat(root.Position) - flat(pos)).Magnitude
-        if moved < 8 then
-            stuck += 1
-            if stuck >= 8 then
-                log("Kẹt không đi tiếp được, bỏ đoạn này")
-                return
+
+        local now = os.clock()
+        if now - lastCheck > 1.2 then
+            local moved = (cur - lastPos).Magnitude
+            if moved < 2.5 then
+                stuck += 1
+                hum.Jump = true
+                if stuck >= 10 then
+                    log("Kẹt không đi tiếp được, bỏ đoạn này")
+                    return
+                end
+            else
+                stuck = 0
             end
-            -- né sang bên 50 stud (đổi bên mỗi lần kẹt) rồi đi tiếp
-            local perp = Vector3.new(-dir.Z, 0, dir.X) * side
-            local sp = root.Position + perp * 50
-            sp = Vector3.new(sp.X, groundAt(sp, root.Position.Y), sp.Z)
-            hum.Jump = true
-            leg(sp, 6)
-            side = -side
-        else
-            stuck = 0
+            lastPos, lastCheck = cur, now
+            hum:MoveTo(pos)
         end
-        task.wait(0.05)
+        task.wait(0.1)
     end
 end
 
