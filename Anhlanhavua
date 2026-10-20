@@ -50,7 +50,7 @@ local stats = { eggs = 0, pets = 0 }
 local carry = { active = false, lost = false, reason = nil, uid = nil }
 local moving = { tele = false, untilT = 0 }
 local resetInfo = { at = 0 }
-local VERSION = "v14"
+local VERSION = "v15"
 
 env.KietHubStop = function()
     alive = false
@@ -97,6 +97,61 @@ local function copyText(s)
     print(s)
     return false
 end
+
+----------------------------------------------------------------
+-- Lưu / tải setting + vị trí Home, Map cuối (file theo PlaceId, cần executor có writefile/readfile)
+----------------------------------------------------------------
+local SAVE_FILE = "KietHub_" .. tostring(game.PlaceId) .. ".json"
+local SAVE_KEYS = { "BringHome", "MinIncome", "MinEggHP", "EggKeyword", "Speed", "ReturnSpeed", "Move", "TeleStep", "Path" }
+local saveQueued = false
+
+local function vecToTable(v)
+    return v and { v.X, v.Y, v.Z } or nil
+end
+
+local function saveSettings()
+    if not writefile then return end
+    local data = { S = {}, home = vecToTable(savedHome), endMap = vecToTable(savedEndMap) }
+    for _, k in ipairs(SAVE_KEYS) do data.S[k] = S[k] end
+    local ok, err = pcall(function()
+        writefile(SAVE_FILE, HttpService:JSONEncode(data))
+    end)
+    if not ok then log("Lưu setting lỗi: " .. tostring(err)) end
+end
+
+local function queueSave()
+    if saveQueued then return end
+    saveQueued = true
+    task.delay(0.5, function()
+        saveQueued = false
+        saveSettings()
+    end)
+end
+
+local function loadSettings()
+    if not (readfile and isfile) then return false end
+    local ok, data = pcall(function()
+        if not isfile(SAVE_FILE) then return nil end
+        return HttpService:JSONDecode(readfile(SAVE_FILE))
+    end)
+    if not ok or type(data) ~= "table" then return false end
+    if type(data.S) == "table" then
+        for _, k in ipairs(SAVE_KEYS) do
+            local v = data.S[k]
+            if v ~= nil and type(v) == type(S[k]) then S[k] = v end
+        end
+    end
+    if S.Move ~= "walk" and S.Move ~= "tween" and S.Move ~= "tele" then S.Move = "walk" end
+    if S.Path ~= "vertical" and S.Path ~= "horizontal" and S.Path ~= "straight" then S.Path = "vertical" end
+    local function toVec(t)
+        if type(t) == "table" and #t == 3 then return Vector3.new(t[1], t[2], t[3]) end
+    end
+    savedHome = toVec(data.home) or savedHome
+    savedEndMap = toVec(data.endMap) or savedEndMap
+    return true
+end
+
+local loadedSettings = loadSettings()
 
 ----------------------------------------------------------------
 -- Helpers
@@ -979,7 +1034,7 @@ end
 local gui = mk("ScreenGui", { Name = "KietSlashHub", ResetOnSpawn = false }, playerGui)
 
 local main = mk("Frame", {
-    Size = UDim2.fromOffset(310, 410),
+    Size = UDim2.fromOffset(380, 410),
     Position = UDim2.new(0, 10, 0.5, -205),
     BackgroundColor3 = C.bg,
     BorderSizePixel = 0,
@@ -1052,19 +1107,19 @@ local function selectTab(name)
 end
 
 local tabBar = mk("Frame", {
-    Position = UDim2.fromOffset(10, 4),
-    Size = UDim2.new(1, -20, 0, 30),
+    Position = UDim2.fromOffset(8, 8),
+    Size = UDim2.new(0, 66, 1, -16),
     BackgroundTransparency = 1,
 }, body)
 mk("UIListLayout", {
-    FillDirection = Enum.FillDirection.Horizontal,
+    FillDirection = Enum.FillDirection.Vertical,
     Padding = UDim.new(0, 6),
     SortOrder = Enum.SortOrder.LayoutOrder,
 }, tabBar)
 
 for i, n in ipairs({ "Farm", "Setup", "Log" }) do
     local b = mk("TextButton", {
-        Size = UDim2.new(1 / 3, -4, 1, 0),
+        Size = UDim2.new(1, 0, 0, 40),
         BackgroundColor3 = C.panel,
         Text = n,
         TextColor3 = C.sub,
@@ -1079,8 +1134,8 @@ end
 
 local function listPage(name)
     local pg = mk("ScrollingFrame", {
-        Position = UDim2.fromOffset(0, 38),
-        Size = UDim2.new(1, 0, 1, -38),
+        Position = UDim2.fromOffset(80, 0),
+        Size = UDim2.new(1, -80, 1, 0),
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
         ScrollBarThickness = 3,
@@ -1139,6 +1194,7 @@ local function switchRow(parent, text, key, cb)
         S[key] = not S[key]
         paint(true)
         if cb then cb() end
+        queueSave()
     end)
 end
 
@@ -1168,7 +1224,10 @@ local function inputRow(parent, text, getter, setter, parse)
     corner(box, 8)
     box.FocusLost:Connect(function()
         local v = (parse or tonumber)(box.Text)
-        if v and v >= 0 then setter(v) end
+        if v and v >= 0 then
+            setter(v)
+            queueSave()
+        end
         box.Text = tostring(getter())
     end)
 end
@@ -1229,7 +1288,10 @@ local function textRow(parent, text, getter, setter)
         ClearTextOnFocus = false,
     }, row)
     corner(box, 8)
-    box.FocusLost:Connect(function() setter(box.Text) end)
+    box.FocusLost:Connect(function()
+        setter(box.Text)
+        queueSave()
+    end)
 end
 
 -- Trang Farm
@@ -1237,9 +1299,9 @@ local farm = listPage("Farm")
 switchRow(farm, "Auto Slash Egg", "AutoSlash", refresh)
 switchRow(farm, "Auto Steal (Take pet)", "AutoSteal", refresh)
 switchRow(farm, "Chạy về điểm nhận pet", "BringHome")
-inputRow(farm, "Chỉ lấy pet từ (M/s)", function() return S.MinIncome / 1e6 end,
+inputRow(farm, "Pet từ (M/s)", function() return S.MinIncome / 1e6 end,
     function(v) S.MinIncome = v * 1e6 end, parseM)
-inputRow(farm, "Chỉ chém egg từ (M máu)", function() return S.MinEggHP / 1e6 end,
+inputRow(farm, "Egg từ (M máu)", function() return S.MinEggHP / 1e6 end,
     function(v) S.MinEggHP = v * 1e6 end, parseM)
 textRow(farm, "Ưu tiên egg (từ khoá)", function() return S.EggKeyword end,
     function(t) S.EggKeyword = (tostring(t):gsub("^%s+", ""):gsub("%s+$", "")) end)
@@ -1282,6 +1344,24 @@ mk("TextLabel", {
 
 -- Trang Setup
 local setup = listPage("Setup")
+local posLabel = mk("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 34),
+    BackgroundTransparency = 1,
+    Text = "",
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    TextColor3 = C.sub,
+    Font = Enum.Font.Gotham,
+    TextSize = 11,
+}, setup)
+local function refreshPosLabel()
+    local function f(v)
+        return v and ("%.0f, %.0f, %.0f"):format(v.X, v.Y, v.Z) or "chưa Set"
+    end
+    posLabel.Text = "Home: " .. f(savedHome) .. "\nMap cuối: " .. f(savedEndMap)
+end
+refreshPosLabel()
 inputRow(setup, "Tốc độ đi (tween)", function() return S.Speed end, function(v)
     S.Speed = math.clamp(v, 10, 1000)
 end)
@@ -1296,6 +1376,8 @@ actionButton(setup, "Set Home (đứng ở điểm nhận pet)", C.ok, function(
     if r then
         savedHome = r.Position
         log("Đã lưu Home")
+        queueSave()
+        refreshPosLabel()
         return "Đã lưu Home ✓"
     end
 end)
@@ -1304,6 +1386,8 @@ actionButton(setup, "Set Map Cuối (đứng map cuối)", C.warn, function()
     if r then
         savedEndMap = r.Position
         log("Đã lưu Map Cuối")
+        queueSave()
+        refreshPosLabel()
         return "Đã lưu Map Cuối ✓"
     end
 end)
@@ -1312,12 +1396,14 @@ local MOVE_NEXT = { walk = "tween", tween = "tele", tele = "walk" }
 actionButton(setup, "Di chuyển: " .. MOVE_LABEL[S.Move], C.warn, function(b)
     S.Move = MOVE_NEXT[S.Move]
     b.Text = "Di chuyển: " .. MOVE_LABEL[S.Move]
+    queueSave()
 end)
 local PATH_LABEL = { vertical = "Dọc (Z trước)", horizontal = "Ngang (X trước)", straight = "Thẳng" }
 local PATH_NEXT = { vertical = "horizontal", horizontal = "straight", straight = "vertical" }
 actionButton(setup, "Hướng chạy về: " .. PATH_LABEL[S.Path], C.panel2, function(b)
     S.Path = PATH_NEXT[S.Path]
     b.Text = "Hướng chạy về: " .. PATH_LABEL[S.Path]
+    queueSave()
 end)
 actionButton(setup, "Dump Egg (lấy info egg Halloween)", C.panel2, function()
     dumpEggs()
@@ -1344,8 +1430,8 @@ end)
 
 -- Trang Log
 local logPage = mk("Frame", {
-    Position = UDim2.fromOffset(0, 38),
-    Size = UDim2.new(1, 0, 1, -38),
+    Position = UDim2.fromOffset(80, 0),
+    Size = UDim2.new(1, -80, 1, 0),
     BackgroundTransparency = 1,
     Visible = false,
 }, body)
@@ -1401,7 +1487,7 @@ local minimized = false
 btnMin.MouseButton1Click:Connect(function()
     minimized = not minimized
     body.Visible = not minimized
-    main.Size = minimized and UDim2.fromOffset(310, 40) or UDim2.fromOffset(310, 410)
+    main.Size = minimized and UDim2.fromOffset(380, 40) or UDim2.fromOffset(380, 410)
 end)
 btnClose.MouseButton1Click:Connect(function()
     S.AutoSlash, S.AutoSteal = false, false
@@ -1432,5 +1518,12 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v14 sẵn sàng")
-print("[Kiet Hub] v14 loaded")
+log("Kiet Hub v15 sẵn sàng")
+if not writefile then
+    log("Executor không có writefile: không lưu được setting")
+elseif loadedSettings then
+    log("Đã tải setting + vị trí Home/Map cuối đã lưu")
+else
+    log("Chưa có setting đã lưu (sẽ tự lưu khi bạn chỉnh)")
+end
+print("[Kiet Hub] v15 loaded")
