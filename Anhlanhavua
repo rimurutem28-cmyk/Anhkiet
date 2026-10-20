@@ -15,6 +15,8 @@ local UserInputService = game:GetService("UserInputService")
 local ProximityPromptService = game:GetService("ProximityPromptService")
 local HttpService = game:GetService("HttpService")
 local PathfindingService = game:GetService("PathfindingService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local lp = Players.LocalPlayer
@@ -32,6 +34,9 @@ local S = {
     Path = "vertical", -- vertical = dọc (Z trước) | horizontal = ngang (X trước) | straight = thẳng
     MinIncome = 20e6,
     EggKeyword = "", -- ưu tiên egg có tên/design chứa từ khoá này (vd: halloween)
+    AutoBoss = false,  -- tới giờ tự vào map boss (PvePortal), pet tự đánh
+    BossMinute = 30,   -- boss mở ở phút này mỗi giờ (dự phòng nếu không đọc được đồng hồ UI)
+    BossStay = 5,      -- ở lại map boss tối đa bao nhiêu phút
     MinEggHP = 0, -- chỉ chém egg có máu >= giá trị này (0 = chém hết)
     Speed = 55,
     ReturnSpeed = 100,
@@ -50,11 +55,12 @@ local stats = { eggs = 0, pets = 0 }
 local carry = { active = false, lost = false, reason = nil, uid = nil }
 local moving = { tele = false, untilT = 0 }
 local resetInfo = { at = 0 }
-local VERSION = "v15"
+local boss = { inFight = false, enteredAt = 0, lastTry = 0, cooldownUntil = 0 }
+local VERSION = "v18"
 
 env.KietHubStop = function()
     alive = false
-    S.AutoSlash, S.AutoSteal = false, false
+    S.AutoSlash, S.AutoSteal, S.AutoBoss = false, false, false
     if curTween then pcall(function() curTween:Cancel() end) end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     local g = playerGui:FindFirstChild("KietSlashHub")
@@ -102,7 +108,7 @@ end
 -- Lưu / tải setting + vị trí Home, Map cuối (file theo PlaceId, cần executor có writefile/readfile)
 ----------------------------------------------------------------
 local SAVE_FILE = "KietHub_" .. tostring(game.PlaceId) .. ".json"
-local SAVE_KEYS = { "BringHome", "MinIncome", "MinEggHP", "EggKeyword", "Speed", "ReturnSpeed", "Move", "TeleStep", "Path" }
+local SAVE_KEYS = { "AutoSlash", "AutoSteal", "AutoBoss", "BossMinute", "BossStay", "BringHome", "MinIncome", "MinEggHP", "EggKeyword", "Speed", "ReturnSpeed", "Move", "TeleStep", "Path" }
 local saveQueued = false
 
 local function vecToTable(v)
@@ -209,7 +215,7 @@ local function walkTo(pos)
 
     local function aborted()
         return not alive or getRoot() ~= root or resetInfo.at ~= startReset
-            or not (S.AutoSlash or S.AutoSteal) or (carry.active and carry.lost)
+            or not (S.AutoSlash or S.AutoSteal or S.AutoBoss) or (carry.active and carry.lost)
     end
 
     -- đi tới 1 điểm; kẹt thì nhảy, MoveTo tự hết hạn sau 8s nên gọi lại định kỳ
@@ -418,6 +424,11 @@ end
 local function onMapReset(reason)
     if os.clock() - resetInfo.at < 5 then return end
     resetInfo.at = os.clock()
+    if boss.inFight and os.clock() - boss.enteredAt > 5 then
+        boss.inFight = false
+        boss.cooldownUntil = os.clock() + 600
+        log("Rời map boss, quay lại farm")
+    end
     log("Map reset / bị đưa về điểm xuất phát: " .. tostring(reason))
     setStatus("Map reset, chạy lại")
     markLost("map reset")
@@ -443,7 +454,7 @@ end
 if lp.Character then task.spawn(hookCharacter, lp.Character) end
 conns[#conns + 1] = lp.CharacterAdded:Connect(function(c)
     task.spawn(hookCharacter, c)
-    if S.AutoSlash or S.AutoSteal then onMapReset("nhân vật hồi sinh") end
+    if S.AutoSlash or S.AutoSteal or S.AutoBoss then onMapReset("nhân vật hồi sinh") end
 end)
 
 local function startCarry(uid)
@@ -477,7 +488,7 @@ task.spawn(function()
         local root = getRoot()
         if root then
             local pos = root.Position
-            if last and (S.AutoSlash or S.AutoSteal) and not moving.tele and os.clock() > moving.untilT
+            if last and (S.AutoSlash or S.AutoSteal or S.AutoBoss) and not moving.tele and os.clock() > moving.untilT
                 and (pos - last).Magnitude > 120 then
                 onMapReset(("vị trí nhảy %d stud"):format((pos - last).Magnitude))
             end
@@ -688,6 +699,7 @@ local function equipWeapon()
 end
 
 local eventCache = { t = 0, list = {} }
+local eggScan = { t = 0, list = {} }
 
 local function eggCandidates()
     local seen, list = {}, {}
@@ -717,20 +729,18 @@ local function eggCandidates()
         end
         for _, m in ipairs(eventCache.list) do add(m) end
     end
+    for _, m in ipairs(eggScan.list) do add(m) end
     return list
 end
 
-local function findEgg()
-    local root = getRoot()
-    if not root then return nil end
-    local kw = S.EggKeyword:lower()
-    local now = os.clock()
+local function pickEgg(list, root, kw, now)
     local bestKey, bestKeyD = nil, math.huge
     local bestNear, bestNearD = nil, math.huge
     local bestEnd, bestEndD = nil, math.huge
-    for _, egg in ipairs(eggCandidates()) do
+    for _, egg in ipairs(list) do
         local hp = egg:GetAttribute("SAE_EggHP")
-        if hp > 0 and egg:IsDescendantOf(workspace) and not (badEgg[egg] and now - badEgg[egg] < 60) then
+        if type(hp) == "number" and hp > 0 and egg:IsDescendantOf(workspace)
+            and not (badEgg[egg] and now - badEgg[egg] < 60) then
             local maxhp = egg:GetAttribute("SAE_EggMaxHP")
             local size = math.max(hp, type(maxhp) == "number" and maxhp or 0)
             local pos = getPos(egg)
@@ -750,7 +760,44 @@ local function findEgg()
             end
         end
     end
-    return bestKey or bestEnd or bestNear
+    return bestKey, bestEnd, bestNear
+end
+
+local function findEgg()
+    local root = getRoot()
+    if not root then return nil end
+    local kw = S.EggKeyword:lower()
+    local now = os.clock()
+    local k, e, n = pickEgg(eggCandidates(), root, kw, now)
+
+    -- có từ khoá mà chưa thấy egg khớp: quét sâu cả workspace (30s/lần) để tìm trứng ở xa / ngoài danh sách thường
+    if kw ~= "" and not k and now - eggScan.t > 30 then
+        eggScan.t = now
+        local found = {}
+        for _, m in ipairs(workspace:GetDescendants()) do
+            if (m:IsA("Model") or m:IsA("BasePart")) and type(m:GetAttribute("SAE_EggHP")) == "number" then
+                found[#found + 1] = m
+            end
+        end
+        eggScan.list = found
+        k, e, n = pickEgg(eggCandidates(), root, kw, now)
+        if k then
+            log(("Quét toàn map: thấy egg khớp '%s' (%d egg)"):format(kw, #found))
+        else
+            log(("Chưa thấy egg khớp '%s' (quét %d egg, Streaming=%s)"):format(kw, #found, tostring(workspace.StreamingEnabled)))
+            if workspace.StreamingEnabled then
+                -- map xa chưa tải: yêu cầu server stream quanh các điểm đã lưu
+                for _, sp in ipairs({ savedEndMap, savedHome }) do
+                    if sp then
+                        task.spawn(function()
+                            pcall(function() lp:RequestStreamAroundAsync(sp, 3) end)
+                        end)
+                    end
+                end
+            end
+        end
+    end
+    return k or e or n
 end
 
 local function slashOnce()
@@ -795,6 +842,223 @@ local function slashOnce()
 end
 
 ----------------------------------------------------------------
+-- Boss Shadow Wraith: tới giờ vào map boss (PvePortal), pet tự đánh
+----------------------------------------------------------------
+local bossLabelCache, bossLabelScan = nil, 0
+
+-- Số giây tới lần boss mở kế tiếp: ưu tiên đọc đồng hồ ô BOSS trên UI game, dự phòng theo giờ server
+local function bossSecondsLeft()
+    if not (bossLabelCache and bossLabelCache.Parent) and os.clock() - bossLabelScan > 10 then
+        bossLabelScan = os.clock()
+        bossLabelCache = nil
+        for _, lbl in ipairs(playerGui:GetDescendants()) do
+            if lbl:IsA("TextLabel") and lbl.Text:upper() == "BOSS" then
+                local container = lbl.Parent
+                for _ = 1, 2 do
+                    if not container then break end
+                    for _, x in ipairs(container:GetDescendants()) do
+                        if x:IsA("TextLabel") and x.Text:match("^%d+:%d%d$") then
+                            bossLabelCache = x
+                            break
+                        end
+                    end
+                    if bossLabelCache then break end
+                    container = container.Parent
+                end
+                if bossLabelCache then break end
+            end
+        end
+    end
+    if bossLabelCache and bossLabelCache.Parent then
+        local m, sec = bossLabelCache.Text:match("^(%d+):(%d%d)$")
+        if m then return tonumber(m) * 60 + tonumber(sec) end
+    end
+    local t = workspace:GetServerTimeNow()
+    return (S.BossMinute * 60 - (t % 3600)) % 3600
+end
+
+-- Thông báo boss của game: "... ARENA OPEN / TAP TO JOIN"
+local function guiShown(g)
+    local o = g
+    while o and o ~= playerGui do
+        if o:IsA("GuiObject") and not o.Visible then return false end
+        if o:IsA("ScreenGui") and not o.Enabled then return false end
+        o = o.Parent
+    end
+    return true
+end
+
+local joinCache = { t = 0, label = nil }
+
+local function findJoinBanner()
+    local c = joinCache.label
+    if c and c.Parent and guiShown(c) then return c end
+    if os.clock() - joinCache.t < 2 then return nil end
+    joinCache.t = os.clock()
+    joinCache.label = nil
+    local mine = playerGui:FindFirstChild("KietSlashHub")
+    for _, d in ipairs(playerGui:GetDescendants()) do
+        if (d:IsA("TextLabel") or d:IsA("TextButton"))
+            and d.Text:upper():find("TAP TO JOIN", 1, true)
+            and not (mine and d:IsDescendantOf(mine)) and guiShown(d) then
+            joinCache.label = d
+            return d
+        end
+    end
+    return nil
+end
+
+-- nút bấm nằm đè lên chữ (trong 2 cấp cha), kiểm tra tâm chữ nằm trong nút cho chắc
+local function findButtonFor(label)
+    local center = label.AbsolutePosition + label.AbsoluteSize / 2
+    local function covers(b)
+        local p, sz = b.AbsolutePosition, b.AbsoluteSize
+        return center.X >= p.X and center.X <= p.X + sz.X and center.Y >= p.Y and center.Y <= p.Y + sz.Y
+    end
+    local o = label
+    while o and o ~= playerGui do
+        if (o:IsA("TextButton") or o:IsA("ImageButton")) and covers(o) then return o end
+        o = o.Parent
+    end
+    local parent = label.Parent
+    for _ = 1, 2 do
+        if not parent or parent == playerGui then break end
+        for _, b in ipairs(parent:GetDescendants()) do
+            if (b:IsA("TextButton") or b:IsA("ImageButton")) and covers(b) then return b end
+        end
+        parent = parent.Parent
+    end
+    return nil
+end
+
+local function activateGui(btn)
+    local fired = false
+    if getconnections then
+        for _, sig in ipairs({ btn.MouseButton1Click, btn.Activated, btn.MouseButton1Down, btn.MouseButton1Up }) do
+            local ok, list = pcall(getconnections, sig)
+            if ok and list then
+                for _, cn in ipairs(list) do
+                    pcall(function() cn:Fire() end)
+                    fired = true
+                end
+            end
+        end
+    end
+    if firesignal and not fired then
+        pcall(firesignal, btn.MouseButton1Click)
+        pcall(firesignal, btn.Activated)
+        fired = true
+    end
+    return fired
+end
+
+local function clickAt(x, y)
+    local inset = GuiService:GetGuiInset()
+    pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(x, y + inset.Y, 0, true, game, 0)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(x, y + inset.Y, 0, false, game, 0)
+    end)
+end
+
+local function joinBossBanner()
+    local label = findJoinBanner()
+    if not label then return false end
+    log("Thấy thông báo boss, đang bấm tham gia")
+    local r0 = getRoot()
+    local before = r0 and r0.Position
+    local btn = findButtonFor(label)
+    if btn then activateGui(btn) end
+    task.wait(0.5)
+    local c = label.AbsolutePosition + label.AbsoluteSize / 2
+    clickAt(c.X, c.Y)
+    task.wait(2.5)
+    local r = getRoot()
+    return r ~= nil and before ~= nil and (r.Position - before).Magnitude > 120
+end
+
+-- Đang trong cửa sổ boss: có thông báo, hoặc sắp mở (<= 15s), hoặc vừa mở (đồng hồ quay lại ~60:00)
+local function bossWindowActive()
+    if findJoinBanner() then return true end
+    local left = bossSecondsLeft()
+    return left <= 15 or left >= 3600 - S.BossStay * 60
+end
+
+local function enterBoss()
+    if joinBossBanner() then return true end
+    local portal = workspace:FindFirstChild("PvePortal")
+    local pos = portal and (getPos(portal) or (function()
+        local bp = portal:FindFirstChildWhichIsA("BasePart", true)
+        return bp and bp.Position
+    end)())
+    if not portal or not pos then
+        log("Không thấy workspace.PvePortal")
+        return false
+    end
+    setStatus("Đi vào map boss")
+    tweenTo(pos, S.Speed)
+    local r0 = getRoot()
+    local before = r0 and r0.Position
+
+    -- cổng dạng prompt
+    for _, p in ipairs(portal:GetDescendants()) do
+        if p:IsA("ProximityPrompt") and p.Enabled then
+            log("Thử prompt cổng: " .. p:GetFullName())
+            pcall(function() p.HoldDuration = 0 end)
+            pcall(fireproximityprompt, p)
+            task.wait(1)
+        end
+    end
+    -- cổng dạng chạm
+    if firetouchinterest then
+        local r = getRoot()
+        if r then
+            for _, part in ipairs(portal:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    pcall(firetouchinterest, r, part, 0)
+                    pcall(firetouchinterest, r, part, 1)
+                end
+            end
+        end
+    end
+    task.wait(2)
+    local r = getRoot()
+    return r ~= nil and before ~= nil and (r.Position - before).Magnitude > 120
+end
+
+-- true = đang bận chuyện boss (bỏ qua farm lượt này)
+local function bossStep()
+    if not S.AutoBoss then return false end
+    local active = bossWindowActive()
+    if boss.inFight then
+        if active and os.clock() - boss.enteredAt < S.BossStay * 60 then
+            setStatus("Ở map boss (pet tự đánh)")
+            task.wait(1)
+            return true
+        end
+        boss.inFight = false
+        boss.cooldownUntil = os.clock() + 600
+        log("Hết thời gian boss, quay lại farm")
+        return false
+    end
+    if active and os.clock() >= boss.cooldownUntil and os.clock() - boss.lastTry > 20 then
+        boss.lastTry = os.clock()
+        moving.untilT = os.clock() + 30 -- bị dịch chuyển vào map boss không tính là reset
+        local ok = enterBoss()
+        moving.untilT = os.clock() + 3
+        if ok then
+            boss.inFight = true
+            boss.enteredAt = os.clock()
+            log("Đã vào map boss")
+        else
+            log("Chưa vào được map boss, thử lại sau 20s (dùng Setup > Dump Boss gửi mình)")
+        end
+        return true
+    end
+    return false
+end
+
+----------------------------------------------------------------
 -- Main loop
 ----------------------------------------------------------------
 local function step()
@@ -803,6 +1067,7 @@ local function step()
         task.wait(3 - since)
     end
     if not getRoot() then return end
+    if bossStep() then return end
     if S.AutoSteal and stealOnce() then return end
     if S.AutoSlash then slashOnce() end
 end
@@ -813,7 +1078,7 @@ local function mainLoop()
     local r = getRoot()
     startPos = r and r.Position or startPos
     log("Bắt đầu chạy")
-    while alive and (S.AutoSlash or S.AutoSteal) do
+    while alive and (S.AutoSlash or S.AutoSteal or S.AutoBoss) do
         local ok, err = pcall(step)
         if not ok then
             warn("[Kiet Hub] " .. tostring(err))
@@ -827,7 +1092,7 @@ local function mainLoop()
 end
 
 local function refresh()
-    if S.AutoSlash or S.AutoSteal then
+    if S.AutoSlash or S.AutoSteal or S.AutoBoss then
         task.spawn(mainLoop)
     elseif curTween then
         curTween:Cancel()
@@ -935,6 +1200,49 @@ local function dumpEggs()
     log(ok and ("Đã copy dump egg (" .. #out .. " dòng)") or "Không có clipboard, đã in ra console (F9)")
 end
 
+local function dumpBoss()
+    local out = {}
+    local function add(x) out[#out + 1] = x end
+    add("== SERVER TIME ==")
+    local t = workspace:GetServerTimeNow()
+    add(("epoch=%d | phút server=%d | giây tới phút %d = %d"):format(t, math.floor(t / 60) % 60, S.BossMinute, (S.BossMinute * 60 - (t % 3600)) % 3600))
+    add("== PvePortal ==")
+    local portal = workspace:FindFirstChild("PvePortal")
+    if portal then
+        add(portal:GetFullName() .. " | " .. portal.ClassName .. " | pos=" .. tostring(getPos(portal)) .. " | " .. attrs(portal))
+        for _, x in ipairs(portal:GetDescendants()) do
+            if x:IsA("ProximityPrompt") then
+                add("PROMPT " .. describePrompt(x))
+            elseif x:IsA("BasePart") then
+                add(("PART %s | pos=%s size=%s CanTouch=%s | %s"):format(
+                    x:GetFullName(), tostring(x.Position), tostring(x.Size), tostring(x.CanTouch), attrs(x)))
+            end
+        end
+    else
+        add("không có workspace.PvePortal")
+    end
+    add("== UI (label có 'boss' hoặc dạng mm:ss) ==")
+    local n = 0
+    for _, x in ipairs(playerGui:GetDescendants()) do
+        if x:IsA("TextLabel") and x.Text ~= "" and (x.Text:lower():find("boss", 1, true) or x.Text:lower():find("join", 1, true)
+            or x.Text:lower():find("arena", 1, true) or x.Text:match("^%d+:%d%d$")) then
+            n += 1
+            if n <= 40 then add(x:GetFullName() .. " = '" .. x.Text .. "'") end
+        end
+    end
+    add("== REMOTE liên quan boss/pve/arena ==")
+    for _, x in ipairs(ReplicatedStorage:GetDescendants()) do
+        if x:IsA("RemoteEvent") or x:IsA("RemoteFunction") then
+            local nm = x.Name:lower()
+            if nm:find("boss") or nm:find("pve") or nm:find("kitsune") or nm:find("arena") then
+                add(x.ClassName .. " " .. x:GetFullName())
+            end
+        end
+    end
+    local ok = copyText(table.concat(out, "\n"))
+    log(ok and ("Đã copy dump boss (" .. #out .. " dòng)") or "Không có clipboard, đã in ra console (F9)")
+end
+
 local rec = { on = false, lines = {} }
 
 local function recAdd(s)
@@ -965,7 +1273,7 @@ local function hookRemote(name)
         for i = 1, select("#", ...) do parts[#parts + 1] = argToText((select(i, ...))) end
         local msg = table.concat(parts, " | ")
         recAdd(name .. ": " .. msg)
-        if msg:lower():find("reset", 1, true) and (S.AutoSlash or S.AutoSteal) then
+        if msg:lower():find("reset", 1, true) and (S.AutoSlash or S.AutoSteal or S.AutoBoss) then
             onMapReset(name .. ": " .. msg)
         end
         if carry.active then
@@ -1303,6 +1611,11 @@ inputRow(farm, "Pet từ (M/s)", function() return S.MinIncome / 1e6 end,
     function(v) S.MinIncome = v * 1e6 end, parseM)
 inputRow(farm, "Egg từ (M máu)", function() return S.MinEggHP / 1e6 end,
     function(v) S.MinEggHP = v * 1e6 end, parseM)
+switchRow(farm, "Auto vào map boss", "AutoBoss", refresh)
+inputRow(farm, "Boss mở phút", function() return S.BossMinute end,
+    function(v) S.BossMinute = math.clamp(math.floor(v), 0, 59) end)
+inputRow(farm, "Ở lại boss (phút)", function() return S.BossStay end,
+    function(v) S.BossStay = math.clamp(v, 1, 30) end)
 textRow(farm, "Ưu tiên egg (từ khoá)", function() return S.EggKeyword end,
     function(t) S.EggKeyword = (tostring(t):gsub("^%s+", ""):gsub("%s+$", "")) end)
 
@@ -1331,9 +1644,9 @@ statsLabel = mk("TextLabel", {
 updateStats()
 
 mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 165),
+    Size = UDim2.new(1, 0, 0, 210),
     BackgroundTransparency = 1,
-    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg (ưu tiên khu Map Cuối nếu đã Set, chỉ egg đủ máu)\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nMap reset: tự phát hiện, chạy lại map cuối\nEgg sự kiện: gõ từ khoá tên egg vào ô Ưu tiên (vd halloween)\nVào base: tự bấm Trang bị",
+    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg (ưu tiên khu Map Cuối nếu đã Set, chỉ egg đủ máu)\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nMap reset: tự phát hiện, chạy lại map cuối\nEgg sự kiện: gõ từ khoá vào ô Ưu tiên (vd pumpkin)\nBoss: bật Auto vào map boss, thấy thông báo thì tự bấm TAP TO JOIN, pet tự đánh\nVào base: tự bấm Trang bị",
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top,
@@ -1404,6 +1717,10 @@ actionButton(setup, "Hướng chạy về: " .. PATH_LABEL[S.Path], C.panel2, fu
     S.Path = PATH_NEXT[S.Path]
     b.Text = "Hướng chạy về: " .. PATH_LABEL[S.Path]
     queueSave()
+end)
+actionButton(setup, "Dump Boss (đứng gần PvePortal)", C.panel2, function()
+    dumpBoss()
+    return "Đã copy ✓"
 end)
 actionButton(setup, "Dump Egg (lấy info egg Halloween)", C.panel2, function()
     dumpEggs()
@@ -1490,7 +1807,8 @@ btnMin.MouseButton1Click:Connect(function()
     main.Size = minimized and UDim2.fromOffset(380, 40) or UDim2.fromOffset(380, 410)
 end)
 btnClose.MouseButton1Click:Connect(function()
-    S.AutoSlash, S.AutoSteal = false, false
+    S.AutoSlash, S.AutoSteal, S.AutoBoss = false, false, false
+    saveSettings()
     alive = false
     if curTween then curTween:Cancel() end
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
@@ -1518,7 +1836,13 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v15 sẵn sàng")
+log("Kiet Hub v18 sẵn sàng")
+if S.AutoSlash or S.AutoSteal or S.AutoBoss then
+    log("Tự chạy lại theo setting đã lưu (sau 3s)")
+    task.delay(3, function()
+        if alive then refresh() end
+    end)
+end
 if not writefile then
     log("Executor không có writefile: không lưu được setting")
 elseif loadedSettings then
@@ -1526,4 +1850,4 @@ elseif loadedSettings then
 else
     log("Chưa có setting đã lưu (sẽ tự lưu khi bạn chỉnh)")
 end
-print("[Kiet Hub] v15 loaded")
+print("[Kiet Hub] v18 loaded")
