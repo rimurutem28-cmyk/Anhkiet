@@ -33,14 +33,10 @@ local S = {
     BringHome = true,
     Path = "vertical", -- vertical = dọc (Z trước) | horizontal = ngang (X trước) | straight = thẳng
     MinIncome = 20e6,
-    PumpkinFirst = true, -- tự ưu tiên trứng bí ngô (Halloween), bỏ qua lọc máu
     EggKeyword = "", -- ưu tiên egg có tên/design chứa từ khoá này (vd: halloween)
     AutoBoss = false,  -- thấy thông báo TAP TO JOIN thì tự vào arena, pet tự đánh
     BossStay = 5,      -- ở lại map boss tối đa bao nhiêu phút
     ViaHome = true,    -- vừa vào game / sau reset: đi qua base (Home) trước rồi mới lên map cuối
-    StrictMap = true,  -- chỉ farm egg trong map đích, không chạy lung tung giữa các map
-    StealRange = 350,  -- Auto Steal chỉ nhặt pet trong bán kính này quanh chỗ đang đứng
-    TargetMap = 0,     -- chọn map đích (1-13); 0 = dùng Map cuối đã Set
     MinEggHP = 0, -- chỉ chém egg có máu >= giá trị này (0 = chém hết)
     Speed = 55,
     ReturnSpeed = 100,
@@ -60,14 +56,13 @@ local carry = { active = false, lost = false, reason = nil, uid = nil }
 local moving = { tele = false, untilT = 0 }
 local resetInfo = { at = 0 }
 local lane = { passedHome = false }
-local boss = { inFight = false, enteredAt = 0, lastTry = 0, cooldownUntil = 0, fails = 0 }
-local hooks = { interrupt = nil, onHome = nil } -- boss bật lên thì ngắt chuyến đi bộ/tween đang chạy
-local mapSpots = {} -- số map -> danh sách vị trí egg (học từ SourceName 'mapNN_...')
+local boss = { inFight = false, enteredAt = 0, lastTry = 0, cooldownUntil = 0 }
+local hooks = { interrupt = nil } -- boss bật lên thì ngắt chuyến đi bộ/tween đang chạy
 local eggSpots, eggSpotSet = {}, {} -- vị trí egg đã từng thấy (lưu file) để quét streaming
 local function spotKey(v)
     return math.floor(v.X / 40) .. "," .. math.floor(v.Z / 40)
 end
-local VERSION = "v23"
+local VERSION = "v20"
 
 env.KietHubStop = function()
     alive = false
@@ -119,7 +114,7 @@ end
 -- Lưu / tải setting + vị trí Home, Map cuối (file theo PlaceId, cần executor có writefile/readfile)
 ----------------------------------------------------------------
 local SAVE_FILE = "KietHub_" .. tostring(game.PlaceId) .. ".json"
-local SAVE_KEYS = { "StrictMap", "StealRange", "TargetMap", "PumpkinFirst", "ViaHome", "AutoSlash", "AutoSteal", "AutoBoss", "BossStay", "BringHome", "MinIncome", "MinEggHP", "EggKeyword", "Speed", "ReturnSpeed", "Move", "TeleStep", "Path" }
+local SAVE_KEYS = { "ViaHome", "AutoSlash", "AutoSteal", "AutoBoss", "BossStay", "BringHome", "MinIncome", "MinEggHP", "EggKeyword", "Speed", "ReturnSpeed", "Move", "TeleStep", "Path" }
 local saveQueued = false
 
 local function vecToTable(v)
@@ -133,12 +128,6 @@ local function saveSettings()
     data.spots = {}
     for _, sp in ipairs(eggSpots) do
         data.spots[#data.spots + 1] = { math.floor(sp.X), math.floor(sp.Y), math.floor(sp.Z) }
-    end
-    data.maps = {}
-    for idx, list in pairs(mapSpots) do
-        local arr = {}
-        for _, v in ipairs(list) do arr[#arr + 1] = { math.floor(v.X), math.floor(v.Y), math.floor(v.Z) } end
-        data.maps[tostring(idx)] = arr
     end
     local ok, err = pcall(function()
         writefile(SAVE_FILE, HttpService:JSONEncode(data))
@@ -181,19 +170,6 @@ local function loadSettings()
             if v and #eggSpots < 300 and not eggSpotSet[spotKey(v)] then
                 eggSpotSet[spotKey(v)] = true
                 eggSpots[#eggSpots + 1] = v
-            end
-        end
-    end
-    if type(data.maps) == "table" then
-        for key, arr in pairs(data.maps) do
-            local idx = tonumber(key)
-            if idx and type(arr) == "table" then
-                local list = {}
-                for _, t in ipairs(arr) do
-                    local v = toVec(t)
-                    if v and #list < 40 then list[#list + 1] = v end
-                end
-                if #list > 0 then mapSpots[idx] = list end
             end
         end
     end
@@ -393,7 +369,6 @@ end
 
 -- Đi tới điểm xa: nếu chưa qua base thì đi về Home trước (tránh tường chắn từ khu xuất phát lên map cuối)
 local function travelTo(pos, speed)
-    local resetAt = resetInfo.at
     if S.ViaHome and savedHome and pos and not lane.passedHome
         and (pos - savedHome).Magnitude > 150 then
         local root = getRoot()
@@ -404,27 +379,6 @@ local function travelTo(pos, speed)
         end
         local r = getRoot()
         if r and (r.Position - savedHome).Magnitude <= 60 then lane.passedHome = true end
-    end
-    local function stale()
-        return not alive or resetInfo.at ~= resetAt or (hooks.interrupt ~= nil and hooks.interrupt())
-    end
-    if stale() then return end
-    local root = getRoot()
-    -- Ra khỏi khu base: đi dọc Z của base tới x=100 (vòng qua đầu bức tường ở x≈47, z từ -61 tới 77) rồi mới lên lane
-    if S.ViaHome and S.Move == "walk" and savedHome and root and pos
-        and root.Position.X < 90 and pos.X > 120 then
-        local gz = savedHome.Z
-        if gz > -62 and gz < 78 then gz = (gz > 8) and 84 or -68 end
-        tweenTo(Vector3.new(100, savedHome.Y, gz), speed)
-        if stale() then return end
-        root = getRoot()
-    end
-    -- Đường dài dọc lane (trục X): đi qua tâm các map đã học cho đúng đường, khỏi cắt chéo
-    if S.Move == "walk" and hooks.lane and root and pos and math.abs(pos.X - root.Position.X) > 500 then
-        for _, wp in ipairs(hooks.lane(root.Position.X, pos.X)) do
-            tweenTo(wp, speed)
-            if stale() then return end
-        end
     end
     tweenTo(pos, speed)
 end
@@ -783,11 +737,8 @@ local skipped = {}
 local function stealOnce()
     local now = os.clock()
     local best, bestInc = nil, 0
-    local sroot = getRoot()
     for _, it in ipairs(findTakeable(false, false)) do
-        local ppos = getPos(it.pet)
-        local near = sroot ~= nil and ppos ~= nil and (ppos - sroot.Position).Magnitude <= S.StealRange
-        if near and not (tried[it.prompt] and now - tried[it.prompt] < 8) then
+        if not (tried[it.prompt] and now - tried[it.prompt] < 8) then
             local inc = worldPetIncome(it.pet)
             if inc >= S.MinIncome then
                 if inc > bestInc then best, bestInc = it, inc end
@@ -838,23 +789,6 @@ end
 local eventCache = { t = 0, list = {} }
 local eggScan = { t = 0, list = {} }
 
-local function recordMapSpot(egg, pos)
-    local src = egg:GetAttribute("SourceName")
-    local idx = type(src) == "string" and tonumber(src:match("^map(%d+)"))
-    if not idx then return end
-    local list = mapSpots[idx]
-    if not list then
-        list = {}
-        mapSpots[idx] = list
-    end
-    for _, v in ipairs(list) do
-        if (v - pos).Magnitude < 40 then return end
-    end
-    if #list >= 40 then return end
-    list[#list + 1] = pos
-    queueSave()
-end
-
 local function rememberSpot(pos)
     local key = spotKey(pos)
     if eggSpotSet[key] or #eggSpots >= 300 then return end
@@ -871,10 +805,7 @@ local function eggCandidates()
             seen[m] = true
             list[#list + 1] = m
             local sp = getPos(m)
-            if sp then
-                rememberSpot(sp)
-                recordMapSpot(m, sp)
-            end
+            if sp then rememberSpot(sp) end
         end
     end
     for _, m in ipairs(CollectionService:GetTagged("SAE_WorldEgg")) do add(m) end
@@ -900,114 +831,29 @@ local function eggCandidates()
     return list
 end
 
--- Tâm map đã học (điểm egg gần tâm nhất) + bán kính
-local function mapCenter(idx)
-    local list = mapSpots[idx]
-    if not list or #list == 0 then return nil, 0 end
-    local sum = Vector3.zero
-    for _, v in ipairs(list) do sum += v end
-    local c = sum / #list
-    local best, bd, far = list[1], math.huge, 0
-    for _, v in ipairs(list) do
-        local dist = (v - c).Magnitude
-        if dist < bd then best, bd = v, dist end
-        if dist > far then far = dist end
-    end
-    return best, far
-end
-
--- Điểm đích: map đã chọn (nếu đã học) hoặc Map cuối đã Set
-local function endMapPos()
-    if S.TargetMap > 0 then
-        local c, radius = mapCenter(S.TargetMap)
-        if c then return c, math.max(220, radius + 100) end
-    end
-    return savedEndMap, S.StrictMap and 260 or 150
-end
-
--- Các điểm đi qua giữa 2 vị trí X dọc lane: tâm các map đã học (điểm egg = chắc chắn đi được)
-hooks.lane = function(fromX, toX)
-    local sign = toX >= fromX and 1 or -1
-    local lo, hi = math.min(fromX, toX), math.max(fromX, toX)
-    local list = {}
-    for idx = 1, 30 do
-        local c = mapCenter(idx)
-        if c and c.X > lo + 150 and c.X < hi - 150 then list[#list + 1] = c end
-    end
-    table.sort(list, function(a, b) return a.X * sign < b.X * sign end)
-    return list
-end
-
--- từ khoá có thể nhiều từ, cách nhau bằng dấu phẩy (vd: pumpkin,halloween)
-local function matchKw(text, kw)
-    for w in kw:gmatch("[^,]+") do
-        w = w:gsub("^%s+", ""):gsub("%s+$", "")
-        if w ~= "" and text:find(w, 1, true) then return true end
-    end
-    return false
-end
-
--- Giờ sự kiện trứng Halloween do server ghi vào thuộc tính Workspace
-local function hwActive()
-    local rt, lu = workspace:GetAttribute("SAE_HwRiseT"), workspace:GetAttribute("SAE_HwEgg_LiveUntil")
-    if type(rt) ~= "number" or type(lu) ~= "number" then return true end
-    local t = workspace:GetServerTimeNow()
-    return t >= rt - 15 and t <= lu + 1200
-end
-
-local function effectiveKw()
-    local kw = S.EggKeyword:lower()
-    if kw ~= "" then return kw end
-    if S.PumpkinFirst and hwActive() then return "pumpkin,halloween" end
-    return ""
-end
-
-local function eggMapIndex(egg)
-    local src = egg:GetAttribute("SourceName")
-    return type(src) == "string" and tonumber(src:match("^map(%d+)")) or nil
-end
-
 local function pickEgg(list, root, kw, now)
     local bestKey, bestKeyD = nil, math.huge
     local bestNear, bestNearD = nil, math.huge
     local bestEnd, bestEndD = nil, math.huge
-    local emp, emr = endMapPos()
-    local strict = S.StrictMap and emp ~= nil
     for _, egg in ipairs(list) do
         local hp = egg:GetAttribute("SAE_EggHP")
         if type(hp) == "number" and hp > 0 and egg:IsDescendantOf(workspace)
             and not (badEgg[egg] and now - badEgg[egg] < 60) then
+            local maxhp = egg:GetAttribute("SAE_EggMaxHP")
+            local size = math.max(hp, type(maxhp) == "number" and maxhp or 0)
             local pos = getPos(egg)
-            if pos then
-                local isKey = false
+            if pos and size >= S.MinEggHP then
+                local d = (root.Position - pos).Magnitude
+                if d < bestNearD then bestNear, bestNearD = egg, d end
+                if savedEndMap and (pos - savedEndMap).Magnitude <= 150 and d < bestEndD then
+                    bestEnd, bestEndD = egg, d
+                end
                 if kw ~= "" then
                     local text = (tostring(egg:GetAttribute("SAE_EggName") or "") .. " "
                         .. tostring(egg:GetAttribute("Design") or "") .. " "
                         .. tostring(egg:GetAttribute("SourceName") or "") .. " "
                         .. egg:GetFullName()):lower()
-                    isKey = matchKw(text, kw)
-                end
-                local maxhp = egg:GetAttribute("SAE_EggMaxHP")
-                local size = math.max(hp, type(maxhp) == "number" and maxhp or 0)
-                if isKey or size >= S.MinEggHP then
-                    local d = (root.Position - pos).Magnitude
-                    if isKey then
-                        if d < bestKeyD then bestKey, bestKeyD = egg, d end
-                    else
-                        -- thuộc map đích? (ưu tiên số map trong tên egg, không có thì theo bán kính quanh điểm đích)
-                        local idx = eggMapIndex(egg)
-                        local inMap
-                        if S.TargetMap > 0 and idx then
-                            inMap = (idx == S.TargetMap)
-                        else
-                            inMap = emp ~= nil and (pos - emp).Magnitude <= emr
-                        end
-                        if inMap then
-                            if d < bestEndD then bestEnd, bestEndD = egg, d end
-                        elseif not strict then
-                            if d < bestNearD then bestNear, bestNearD = egg, d end
-                        end
-                    end
+                    if text:find(kw, 1, true) and d < bestKeyD then bestKey, bestKeyD = egg, d end
                 end
             end
         end
@@ -1020,16 +866,13 @@ local sweep = { t = 0, running = false, idx = 0 }
 -- Điểm để server stream map xa: dọc đường Home -> Map cuối mỗi 400 stud, rồi tới các vị trí egg đã nhớ
 local function sweepPoints()
     local pts = {}
-    local emp = endMapPos()
-    if savedHome and emp then
-        local dvec = emp - savedHome
+    if savedHome and savedEndMap then
+        local dvec = savedEndMap - savedHome
         local len = dvec.Magnitude
         if len > 1 then
             for t = 0, len, 400 do pts[#pts + 1] = savedHome + dvec.Unit * t end
         end
     end
-    local rise = workspace:GetAttribute("SAE_HwRiseAt")
-    if typeof(rise) == "Vector3" and hwActive() then table.insert(pts, 1, rise) end
     for _, sp in ipairs(eggSpots) do pts[#pts + 1] = sp end
     return pts
 end
@@ -1057,12 +900,12 @@ end
 local function findEgg()
     local root = getRoot()
     if not root then return nil end
-    local kw = effectiveKw()
+    local kw = S.EggKeyword:lower()
     local now = os.clock()
     local k, e, n = pickEgg(eggCandidates(), root, kw, now)
 
     -- có từ khoá mà chưa thấy egg khớp: quét sâu cả workspace (30s/lần) để tìm trứng ngoài danh sách thường
-    if kw ~= "" and not k and now - eggScan.t > 60 then
+    if kw ~= "" and not k and now - eggScan.t > 30 then
         eggScan.t = now
         local found = {}
         for _, m in ipairs(workspace:GetDescendants()) do
@@ -1074,7 +917,7 @@ local function findEgg()
         k, e, n = pickEgg(eggCandidates(), root, kw, now)
         if k then
             log(("Quét toàn map: thấy egg khớp '%s' (%d egg)"):format(kw, #found))
-        elseif S.EggKeyword ~= "" then
+        else
             log(("Chưa thấy egg khớp '%s' (đang tải %d egg, Streaming=%s)"):format(kw, #found, tostring(workspace.StreamingEnabled)))
         end
     end
@@ -1089,7 +932,7 @@ local function findEgg()
                 local kk, ee, nn = pickEgg(eggCandidates(), r, kw, os.clock())
                 if kw ~= "" then return kk ~= nil end
                 return (kk or ee or nn) ~= nil
-            end, nothing and 30 or (S.EggKeyword ~= "" and 120 or 240))
+            end, nothing and 30 or 120)
         end
     end
     return k or e or n
@@ -1108,86 +951,14 @@ local function nearestEggTo(pos, r)
     return best
 end
 
-local learn = { running = false, stop = false }
-
--- Học toàn map: nhờ server stream từng vùng (nền), egg tải được đến đâu thì ghi nhớ số map + vị trí đến đó
-local function learnMaps()
-    if learn.running then
-        learn.stop = true
-        return
-    end
-    local r0 = getRoot()
-    local origin = savedHome or (r0 and r0.Position)
-    if not origin then return end
-    learn.running, learn.stop = true, false
-    task.spawn(function()
-        local pts = {}
-        local emp = endMapPos()
-        if emp and (emp - origin).Magnitude > 1 then
-            local dvec = emp - origin
-            local len = dvec.Magnitude
-            local dir = dvec.Unit
-            local side = Vector3.new(-dir.Z, 0, dir.X)
-            for t = -500, len + 800, 450 do
-                for l = -1800, 1800, 600 do
-                    pts[#pts + 1] = origin + dir * t + side * l
-                end
-            end
-        else
-            for x = -4800, 4800, 800 do
-                for z = -4800, 4800, 800 do
-                    pts[#pts + 1] = origin + Vector3.new(x, 0, z)
-                end
-            end
-        end
-        log(("Học map: quét %d điểm (chạy nền, vài phút)"):format(#pts))
-        for i, pt in ipairs(pts) do
-            if learn.stop or not alive then break end
-            pcall(function() lp:RequestStreamAroundAsync(pt, 2) end)
-            eggCandidates() -- ghi nhớ egg + map vừa tải
-            if i % 12 == 0 then
-                local known = {}
-                for idx = 1, 20 do
-                    if mapSpots[idx] then known[#known + 1] = idx end
-                end
-                log(("Học map %d/%d - đã biết map: %s"):format(i, #pts, table.concat(known, ",")))
-                if hooks.onHome then hooks.onHome() end
-            end
-        end
-        local stopped = learn.stop
-        learn.running = false
-        if hooks.onHome then hooks.onHome() end
-        log(stopped and "Đã dừng học map" or "Học map xong")
-    end)
-end
-
--- Tự tìm base của mình: SAE_Plot có SAE_OwnerUserId = UserId của mình (hoặc SAE_OwnerName khớp tên); điểm đến = SAE_PenFront (cửa chuồng)
-local function autoBase()
-    local myId = tostring(lp.UserId)
-    for _, plot in ipairs(CollectionService:GetTagged("SAE_Plot")) do
-        local owner = plot:GetAttribute("SAE_OwnerUserId")
-        local oname = plot:GetAttribute("SAE_OwnerName")
-        if (owner ~= nil and tostring(owner) == myId) or oname == lp.Name or oname == lp.DisplayName then
-            local pf = plot:GetAttribute("SAE_PenFront")
-            if typeof(pf) == "CFrame" then return pf.Position, "SAE_Plot (PenFront)" end
-            return plotCenter(plot), "SAE_Plot"
-        end
-    end
-    return nil
-end
-
 local function slashOnce()
     local root = getRoot()
     if not root then return end
     local egg = findEgg()
     if not egg then
         setStatus("Chờ egg" .. (S.MinEggHP > 0 and (" >= " .. fmtNum(S.MinEggHP) .. " máu") or ""))
-        local emp = endMapPos()
-        if S.TargetMap > 0 and not mapCenter(S.TargetMap) and os.clock() - (sweep.t or 0) > 0 then
-            setStatus(("Chưa biết vị trí map %d (bấm Học toàn map)"):format(S.TargetMap))
-        end
-        if emp and (root.Position - emp).Magnitude > 45 then
-            travelTo(emp, S.Speed)
+        if savedEndMap and (root.Position - savedEndMap).Magnitude > 45 then
+            travelTo(savedEndMap, S.Speed)
         end
         return
     end
@@ -1323,20 +1094,6 @@ local function joinBossBanner()
     return r ~= nil and before ~= nil and (r.Position - before).Magnitude > 120
 end
 
--- Dự phòng: workspace có KitsuneArena_PortalPos (cổng vật lý của arena)
-local function joinViaPortal()
-    local pp = workspace:GetAttribute("KitsuneArena_PortalPos")
-    if typeof(pp) ~= "Vector3" then return false end
-    log(("Thử vào arena bằng cổng ở %.0f, %.0f, %.0f"):format(pp.X, pp.Y, pp.Z))
-    local r0 = getRoot()
-    local before = r0 and r0.Position
-    tweenTo(pp, S.Speed)
-    moving.untilT = os.clock() + 20
-    task.wait(6)
-    local r = getRoot()
-    return r ~= nil and before ~= nil and (r.Position - before).Magnitude > 120
-end
-
 local function bossWindowActive()
     return findJoinBanner() ~= nil
 end
@@ -1360,15 +1117,12 @@ local function bossStep()
         boss.lastTry = os.clock()
         moving.untilT = os.clock() + 30 -- bị dịch chuyển vào arena không tính là reset
         local ok = joinBossBanner()
-        if not ok and boss.fails >= 2 then ok = joinViaPortal() end
         moving.untilT = os.clock() + 3
         if ok then
-            boss.fails = 0
             boss.inFight = true
             boss.enteredAt = os.clock()
             log("Đã vào map boss")
         else
-            boss.fails += 1
             log("Bấm tham gia boss chưa vào được, thử lại sau 20s")
         end
         return true
@@ -1403,16 +1157,6 @@ local function mainLoop()
     local r = getRoot()
     startPos = r and r.Position or startPos
     lane.passedHome = savedHome ~= nil and r ~= nil and (r.Position - savedHome).Magnitude <= 45
-    if not savedHome then
-        local bp, src = autoBase()
-        if bp then
-            savedHome = bp
-            log("Tự tìm base (" .. src .. ")")
-            queueSave()
-            if hooks.onHome then hooks.onHome() end
-            lane.passedHome = r ~= nil and (r.Position - savedHome).Magnitude <= 45
-        end
-    end
     log("Bắt đầu chạy")
     while alive and (S.AutoSlash or S.AutoSteal or S.AutoBoss) do
         local ok, err = pcall(step)
@@ -1577,76 +1321,6 @@ local function dumpBoss()
     end
     local ok = copyText(table.concat(out, "\n"))
     log(ok and ("Đã copy dump boss (" .. #out .. " dòng)") or "Không có clipboard, đã in ra console (F9)")
-end
-
-local function dumpMap()
-    local out = {}
-    local function add(x) out[#out + 1] = x end
-    local function posOf(c)
-        local pp = getPos(c)
-        if not pp then
-            local bp = c:FindFirstChildWhichIsA("BasePart", true)
-            pp = bp and bp.Position
-        end
-        return pp
-    end
-    for _, name in ipairs({ "Map", "SpeedSigns", "SpecialRegions", "Treadmills", "Spawn" }) do
-        add("== workspace." .. name .. " ==")
-        local f = workspace:FindFirstChild(name)
-        if not f then
-            add("không có")
-        else
-            for i, c in ipairs(f:GetChildren()) do
-                if i > 40 then
-                    add("... còn nữa")
-                    break
-                end
-                add(("%s | %s | pos=%s | %s"):format(c.Name, c.ClassName, tostring(posOf(c)), attrs(c)))
-            end
-        end
-    end
-    add("== SAE_Zone ==")
-    for _, z in ipairs(CollectionService:GetTagged("SAE_Zone")) do
-        add(("%s | %s | pos=%s | %s"):format(z:GetFullName(), z.ClassName, tostring(posOf(z)), attrs(z)))
-    end
-    add("== SAE_BaseOwnerTag ==")
-    for _, c in ipairs(workspace:GetChildren()) do
-        if c.Name == "SAE_BaseOwnerTag" then
-            local texts = {}
-            for _, dsc in ipairs(c:GetDescendants()) do
-                if dsc:IsA("TextLabel") and dsc.Text ~= "" then texts[#texts + 1] = dsc.Text end
-            end
-            add(("pos=%s | %s | texts=%s"):format(tostring(posOf(c)), attrs(c), table.concat(texts, " / ")))
-        end
-    end
-    add("== SAE_Plot ==")
-    for _, plot in ipairs(CollectionService:GetTagged("SAE_Plot")) do
-        add(("%s | pos=%s | %s | cha: %s"):format(plot:GetFullName(), tostring(posOf(plot)), attrs(plot), plot.Parent and attrs(plot.Parent) or ""))
-    end
-    add("== MAP ĐÃ HỌC ==")
-    for idx = 1, 30 do
-        local list = mapSpots[idx]
-        if list then
-            local c, radius = mapCenter(idx)
-            add(("map %d: %d điểm | tâm=%s | bán kính=%.0f"):format(idx, #list, tostring(c), radius))
-        end
-    end
-    add("== UI có chữ teleport/map/zone/world ==")
-    local n = 0
-    local mine = playerGui:FindFirstChild("KietSlashHub")
-    for _, x in ipairs(playerGui:GetDescendants()) do
-        if (x:IsA("TextButton") or x:IsA("ImageButton") or x:IsA("TextLabel")) and not (mine and x:IsDescendantOf(mine)) then
-            local text = x:IsA("ImageButton") and "" or x.Text
-            local key = (x.Name .. " " .. text):lower()
-            if key:find("teleport", 1, true) or key:find("tele", 1, true) or key:find("zone", 1, true)
-                or key:find("world", 1, true) or key:find("map", 1, true) or key:find("travel", 1, true) then
-                n += 1
-                if n <= 60 then add(x:GetFullName() .. " | " .. x.ClassName .. " | '" .. text .. "'") end
-            end
-        end
-    end
-    local ok = copyText(table.concat(out, "\n"))
-    log(ok and ("Đã copy dump map (" .. #out .. " dòng)") or "Không có clipboard, đã in ra console (F9)")
 end
 
 local rec = { on = false, lines = {} }
@@ -1994,7 +1668,7 @@ local function textRow(parent, text, getter, setter)
         Position = UDim2.new(1, -94, 0.5, -14),
         BackgroundColor3 = C.panel2,
         Text = getter(),
-        PlaceholderText = "vd: pumpkin,halloween",
+        PlaceholderText = "vd: halloween",
         PlaceholderColor3 = C.sub,
         TextColor3 = C.text,
         Font = Enum.Font.GothamMedium,
@@ -2018,20 +1692,9 @@ inputRow(farm, "Pet từ (M/s)", function() return S.MinIncome / 1e6 end,
     function(v) S.MinIncome = v * 1e6 end, parseM)
 inputRow(farm, "Egg từ (M máu)", function() return S.MinEggHP / 1e6 end,
     function(v) S.MinEggHP = v * 1e6 end, parseM)
-inputRow(farm, "Map đích (0=tự)", function() return S.TargetMap end,
-    function(v)
-        S.TargetMap = math.clamp(math.floor(v), 0, 20)
-        if S.TargetMap > 0 and not mapCenter(S.TargetMap) then
-            log(("Chưa biết vị trí map %d: bấm 'Học toàn map' (tab Setup) hoặc đi qua map đó 1 lần"):format(S.TargetMap))
-        end
-    end)
 switchRow(farm, "Auto vào map boss", "AutoBoss", refresh)
 inputRow(farm, "Ở lại boss (phút)", function() return S.BossStay end,
     function(v) S.BossStay = math.clamp(v, 1, 30) end)
-switchRow(farm, "Chỉ farm map đích", "StrictMap")
-inputRow(farm, "Tầm lấy pet (stud)", function() return S.StealRange end,
-    function(v) S.StealRange = math.clamp(v, 50, 6000) end)
-switchRow(farm, "Ưu tiên bí ngô (event)", "PumpkinFirst")
 textRow(farm, "Ưu tiên egg (từ khoá)", function() return S.EggKeyword end,
     function(t) S.EggKeyword = (tostring(t):gsub("^%s+", ""):gsub("%s+$", "")) end)
 
@@ -2060,9 +1723,9 @@ statsLabel = mk("TextLabel", {
 updateStats()
 
 mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 335),
+    Size = UDim2.new(1, 0, 0, 235),
     BackgroundTransparency = 1,
-    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg (ưu tiên khu Map Cuối nếu đã Set, chỉ egg đủ máu)\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nMap reset: tự phát hiện, chạy lại map cuối\nBí ngô: công tắc Ưu tiên bí ngô tự đánh trứng pumpkin khi có event (bỏ qua lọc máu); ô từ khoá để thêm loại egg khác\nBoss: bật Auto vào map boss, thấy thông báo thì tự bấm TAP TO JOIN, pet tự đánh\nQua base trước: vừa vào game/reset thì đi về Home rồi mới lên map cuối\nMap đích: nhập số map 1-13 là tự tới; bật 'Chỉ farm map đích' để không đi lung tung giữa các map\nAuto Steal chỉ nhặt pet trong 'Tầm lấy pet' quanh chỗ bạn đứng\nVào base: tự bấm Trang bị",
+    Text = "1. Setup: Set Home đúng điểm bạn chạy về để pet vào túi, Set Map Cuối\n2. Auto Slash: chém egg (ưu tiên khu Map Cuối nếu đã Set, chỉ egg đủ máu)\n3. Auto Steal: chỉ Take pet từ số M/s ở ô trên trở lên, rồi chạy về điểm nhận\nBị boss đánh giữa đường: tự bỏ chạy, quay lại chém\nMap reset: tự phát hiện, chạy lại map cuối\nEgg sự kiện: gõ từ khoá vào ô Ưu tiên (vd pumpkin)\nBoss: bật Auto vào map boss, thấy thông báo thì tự bấm TAP TO JOIN, pet tự đánh\nQua base trước: vừa vào game/reset thì đi về Home rồi mới lên map cuối\nVào base: tự bấm Trang bị",
     TextWrapped = true,
     TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top,
@@ -2074,7 +1737,7 @@ mk("TextLabel", {
 -- Trang Setup
 local setup = listPage("Setup")
 local posLabel = mk("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 50),
+    Size = UDim2.new(1, 0, 0, 34),
     BackgroundTransparency = 1,
     Text = "",
     TextWrapped = true,
@@ -2088,15 +1751,9 @@ local function refreshPosLabel()
     local function f(v)
         return v and ("%.0f, %.0f, %.0f"):format(v.X, v.Y, v.Z) or "chưa Set"
     end
-    local known = {}
-    for idx = 1, 30 do
-        if mapSpots[idx] then known[#known + 1] = idx end
-    end
     posLabel.Text = "Home: " .. f(savedHome) .. "\nMap cuối: " .. f(savedEndMap)
-        .. "\nMap đã học: " .. (#known > 0 and table.concat(known, ",") or "chưa có")
 end
 refreshPosLabel()
-hooks.onHome = refreshPosLabel
 inputRow(setup, "Tốc độ đi (tween)", function() return S.Speed end, function(v)
     S.Speed = math.clamp(v, 10, 1000)
 end)
@@ -2139,30 +1796,6 @@ actionButton(setup, "Hướng chạy về: " .. PATH_LABEL[S.Path], C.panel2, fu
     S.Path = PATH_NEXT[S.Path]
     b.Text = "Hướng chạy về: " .. PATH_LABEL[S.Path]
     queueSave()
-end)
-actionButton(setup, "Học toàn map (chạy nền, bấm lại để dừng)", C.ok, function()
-    if learn.running then
-        learn.stop = true
-        return "Đang dừng..."
-    end
-    learnMaps()
-    return "Bắt đầu học map ✓"
-end)
-actionButton(setup, "Tự tìm base của mình", C.ok, function()
-    local bp, src = autoBase()
-    if bp then
-        savedHome = bp
-        queueSave()
-        refreshPosLabel()
-        log("Tự tìm base (" .. src .. ")")
-        return "Đã tìm base ✓"
-    end
-    log("Không tìm thấy base theo chủ nhân, hãy Set Home thủ công hoặc gửi Dump Map")
-    return "Không thấy base"
-end)
-actionButton(setup, "Dump Map (tìm teleport / base / map)", C.panel2, function()
-    dumpMap()
-    return "Đã copy ✓"
 end)
 actionButton(setup, "Dump Boss (đứng gần PvePortal)", C.panel2, function()
     dumpBoss()
@@ -2282,7 +1915,7 @@ conns[#conns + 1] = UserInputService.InputChanged:Connect(function(i)
     end
 end)
 
-log("Kiet Hub v23 sẵn sàng")
+log("Kiet Hub v20 sẵn sàng")
 if S.AutoSlash or S.AutoSteal or S.AutoBoss then
     log("Tự chạy lại theo setting đã lưu (sau 3s)")
     task.delay(3, function()
@@ -2296,4 +1929,4 @@ elseif loadedSettings then
 else
     log("Chưa có setting đã lưu (sẽ tự lưu khi bạn chỉnh)")
 end
-print("[Kiet Hub] v23 loaded")
+print("[Kiet Hub] v20 loaded")
